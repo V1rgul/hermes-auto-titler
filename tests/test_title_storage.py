@@ -21,7 +21,10 @@ TITLES = [CHINESE_TITLE, IDENTIFIER_TITLE]
 
 
 class TransactionalSandbox(SandboxSqliteSessionDB):
-    """Real isolated SQLite plus the modern host's transaction/CAS surface."""
+    """Real isolated SQLite modelling the Hermes 0.23.3 store's title writes.
+
+    Each write is one host transaction: ``set_auto_title`` writes over an untitled or derived row only, ``set_session_title`` writes a user title and ``set_session_title_source`` rewrites the provenance. The plugin cannot reach the transaction itself, so replacing an llm title takes two of them.
+    """
 
     def __init__(self, db_path):
         super().__init__(db_path)
@@ -30,7 +33,7 @@ class TransactionalSandbox(SandboxSqliteSessionDB):
         self.transaction_log = []
         self.before_write = None
 
-    def _execute_write(self, fn):
+    def _transaction(self, fn):
         self.write_attempts += 1
         if self.before_write is not None:
             callback, self.before_write = self.before_write, None
@@ -49,12 +52,28 @@ class TransactionalSandbox(SandboxSqliteSessionDB):
             raise
 
     def set_auto_title(self, session_id, title, source="llm"):
-        return self._execute_write(
+        return self._transaction(
             lambda conn: conn.execute(
                 "UPDATE sessions SET title = ?, title_source = ? "
                 "WHERE id = ? AND (title IS NULL OR title = '' "
                 "OR title_source = 'derived')",
                 (title, source, session_id),
+            ).rowcount > 0
+        )
+
+    def set_session_title(self, session_id, title):
+        return self._transaction(
+            lambda conn: conn.execute(
+                "UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?",
+                (title, session_id),
+            ).rowcount > 0
+        )
+
+    def set_session_title_source(self, session_id, source):
+        return self._transaction(
+            lambda conn: conn.execute(
+                "UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL",
+                (source, session_id),
             ).rowcount > 0
         )
 
@@ -101,6 +120,11 @@ def sandbox(tmp_path):
         yield db
     finally:
         db.close()
+
+
+def committed(source):
+    """The transactions of one successful write: llm → llm takes the user-title write plus the provenance rewrite."""
+    return ["BEGIN", "COMMIT"] * (2 if source == "llm" else 1)
 
 
 def make_titler(db, *, title=CHINESE_TITLE, action="rename", **cfg):
@@ -169,8 +193,7 @@ def test_real_sqlite_write_preserves_full_title_and_llm_provenance(
     assert titler._write(sandbox, "target", title, expected_title=old_title) == title
     assert sandbox.get_session_title("target") == title
     assert sandbox.get_session_title_source("target") == "llm"
-    assert sandbox.write_attempts == 1
-    assert sandbox.transaction_log == ["BEGIN", "COMMIT"]
+    assert sandbox.transaction_log == committed(source)
 
 
 @pytest.mark.parametrize("title", TITLES)
@@ -213,7 +236,8 @@ def test_manual_title_set_during_model_call_is_not_overwritten(sandbox):
     assert sandbox.write_attempts == 0
 
 
-@pytest.mark.parametrize("source", [None, "derived", "llm"])
+# Only set_auto_title rejects a user title that lands between the plugin's last check and its write. An llm → llm replacement has no compare-and-set on the Hermes 0.23.3 storage interface, so that race is not covered there.
+@pytest.mark.parametrize("source", [None, "derived"])
 def test_manual_takeover_at_transaction_boundary_fails_without_suffix(sandbox, source):
     old = "Old title" if source is not None else None
     sandbox.add("target", old, source)
@@ -229,7 +253,7 @@ def test_manual_takeover_at_transaction_boundary_fails_without_suffix(sandbox, s
     assert sandbox.transaction_log == ["BEGIN", "COMMIT"]
 
 
-def test_cas_rejects_external_llm_rename_without_suffix_retry(sandbox):
+def test_external_llm_rename_during_model_call_is_not_overwritten(sandbox):
     sandbox.add("target", "Old title", "llm")
     titler, llm = make_titler(sandbox)
     llm.before_response = lambda: sandbox.conn.execute(
@@ -239,8 +263,7 @@ def test_cas_rejects_external_llm_rename_without_suffix_retry(sandbox):
     assert titler.evaluate("target", force=True)["action"] == "failed"
     assert sandbox.get_session_title("target") == "External automatic title"
     assert sandbox.get_session_title_source("target") == "llm"
-    assert sandbox.write_attempts == 1
-    assert sandbox.transaction_log == ["BEGIN", "COMMIT"]
+    assert sandbox.write_attempts == 0
 
 
 def test_pending_then_approve_renames_with_full_title(sandbox):
@@ -258,7 +281,7 @@ def test_pending_then_approve_renames_with_full_title(sandbox):
     }
     assert sandbox.get_session_title("target") == CHINESE_TITLE
     assert sandbox.get_session_title_source("target") == "llm"
-    assert sandbox.write_attempts == 1
+    assert sandbox.transaction_log == committed("llm")
     assert "target" not in titler._pending
 
 
@@ -276,7 +299,7 @@ def test_full_pending_title_still_requires_cooldown_then_approval(sandbox):
     titler._last_eval["target"] -= 301
     assert titler.evaluate("target") == {"action": "renamed", "title": CHINESE_TITLE}
     assert sandbox.get_session_title("target") == CHINESE_TITLE
-    assert sandbox.write_attempts == 1
+    assert sandbox.transaction_log == committed("llm")
     assert len(llm.calls) == 2
 
 
@@ -292,7 +315,7 @@ def test_full_title_write_still_obeys_automatic_rename_limit(sandbox):
         "renames": 1, "limit": 1,
     }
     assert sandbox.get_session_title("target") == CHINESE_TITLE
-    assert sandbox.write_attempts == 1
+    assert sandbox.transaction_log == committed("llm")
     assert len(llm.calls) == 1
 
 
@@ -309,8 +332,7 @@ def test_duplicate_suffix_keeps_the_entire_base(sandbox, source, title):
     assert sandbox.get_session_title("target") == expected
     assert sandbox.get_session_title_source("target") == "llm"
     assert sandbox.get_session_title("occupied") == title
-    assert sandbox.write_attempts == 2
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK", "BEGIN", "COMMIT"]
+    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] + committed(source)
 
 
 @pytest.mark.parametrize("source", [None, "llm"])
@@ -342,8 +364,7 @@ def test_multiple_duplicate_suffixes_are_tried_in_order(sandbox, source):
     titler, _ = make_titler(sandbox)
     assert titler._write(sandbox, "target", title, expected_title=old) == title + " (4)"
     assert sandbox.get_session_title("target") == title + " (4)"
-    assert sandbox.write_attempts == 4
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] * 3 + ["BEGIN", "COMMIT"]
+    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] * 3 + committed(source)
 
 
 @pytest.mark.parametrize("source", [None, "llm"])
@@ -362,9 +383,8 @@ def test_two_digit_suffix_obeys_storage_limit_without_shortening(sandbox, source
     assert titler._write(sandbox, "target", title, expected_title=old) == expected
     assert sandbox.get_session_title("target") == (expected if expected else old)
     assert sandbox.get_session_title_source("target") == ("llm" if expected else source)
-    assert sandbox.write_attempts == (10 if expected else 9)
     assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] * 9 + (
-        ["BEGIN", "COMMIT"] if expected else []
+        committed(source) if expected else []
     )
 
 
@@ -392,7 +412,7 @@ def test_non_unique_sqlite_error_does_not_trigger_suffixes(sandbox, monkeypatch)
         attempts.append(fn)
         raise sqlite3.OperationalError("synthetic disk write error")
 
-    monkeypatch.setattr(sandbox, "_execute_write", broken_writer)
+    monkeypatch.setattr(sandbox, "_transaction", broken_writer)
     assert titler._write(sandbox, "target", CHINESE_TITLE, expected_title="Old title") is None
     assert sandbox.get_session_title("target") == "Old title"
     assert len(attempts) == 1
@@ -424,7 +444,7 @@ def test_unrelated_value_error_does_not_trigger_suffixes(sandbox, monkeypatch, s
         attempts.append(fn)
         raise ValueError("synthetic unrelated validation error")
 
-    monkeypatch.setattr(sandbox, "_execute_write", broken_writer)
+    monkeypatch.setattr(sandbox, "_transaction", broken_writer)
     titler, _ = make_titler(sandbox)
     assert titler._write(sandbox, "target", CHINESE_TITLE, expected_title=old) is None
     assert sandbox.get_session_title("target") == old
@@ -507,7 +527,7 @@ def test_other_resource_or_other_title_value_error_does_not_retry(
         attempts.append(fn)
         raise ValueError(message)
 
-    monkeypatch.setattr(sandbox, "_execute_write", broken_writer)
+    monkeypatch.setattr(sandbox, "_transaction", broken_writer)
     titler, _ = make_titler(sandbox)
     assert titler._write(sandbox, "target", CHINESE_TITLE, expected_title=old) is None
     assert sandbox.get_session_title("target") == old

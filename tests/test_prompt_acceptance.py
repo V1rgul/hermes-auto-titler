@@ -36,8 +36,6 @@ def test_session_sampling_skips_user_owned_titles():
     from scripts.prompt_acceptance import _session_candidates
 
     class FakeDB:
-        TITLE_SOURCE_USER = "user"
-
         def list_sessions_rich(self, **kwargs):
             return [
                 {"id": "manual", "title": "手改", "title_source": "user"},
@@ -47,7 +45,7 @@ def test_session_sampling_skips_user_owned_titles():
         def get_session_title_source(self, sid):
             return "user" if sid == "manual" else "llm"
 
-        def get_messages_as_conversation(self, sid, include_ancestors=True):
+        def get_messages_as_conversation(self, sid, include_ancestors=True, include_compacted=False):
             return [{"role": "user", "content": f"topic {sid}"}]
 
     samples = _session_candidates(
@@ -61,8 +59,6 @@ def test_recent_sampling_uses_activity_order():
     from scripts.prompt_acceptance import _session_candidates
 
     class FakeDB:
-        TITLE_SOURCE_USER = "user"
-
         def list_sessions_rich(self, **kwargs):
             return [
                 {"id": "old", "last_active": "2026-01-01"},
@@ -72,7 +68,7 @@ def test_recent_sampling_uses_activity_order():
         def get_session_title_source(self, sid):
             return "llm"
 
-        def get_messages_as_conversation(self, sid, include_ancestors=True):
+        def get_messages_as_conversation(self, sid, include_ancestors=True, include_compacted=False):
             return [{"role": "user", "content": f"topic {sid}"}]
 
     samples = _session_candidates(

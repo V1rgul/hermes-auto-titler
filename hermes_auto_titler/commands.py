@@ -118,7 +118,7 @@ def make_handler(titler) -> Callable[[str], str]:
             # 解析目标会话 ID：优先精准匹配或前缀匹配持久化 ID，否则回退当前活跃会话
             sid = None
             if raw_arg:
-                sid = getattr(db, "resolve_session_id", lambda x: None)(raw_arg) or raw_arg
+                sid = db.resolve_session_id(raw_arg) or raw_arg
             if not sid:
                 sid = titler._current_session
             if not sid:

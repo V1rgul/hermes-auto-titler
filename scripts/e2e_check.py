@@ -9,9 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_state import SessionDB
-
 from hermes_auto_titler.config import load_config
+from hermes_auto_titler.host_store import open_session_store
 from hermes_auto_titler.titler import AutoTitler
 
 
@@ -25,7 +24,7 @@ class Ctx:
 
 
 def main():
-    db = SessionDB()
+    db = open_session_store()
     sid = sys.argv[1] if len(sys.argv) > 1 else None
     if not sid:
         row = db._conn.execute(

@@ -21,11 +21,6 @@ from hermes_auto_titler.titler import AutoTitler
 
 
 class FakeDB:
-    TITLE_SOURCE_DERIVED = "derived"
-    TITLE_SOURCE_LLM = "llm"
-    TITLE_SOURCE_USER = "user"
-    MAX_TITLE_LENGTH = 100
-
     def __init__(self, messages=None, title=None, source=None, conflict_titles=None, sessions=None):
         self.messages = messages or []
         self.title = title
@@ -36,7 +31,7 @@ class FakeDB:
         # 模拟「插件 set_session_title 之后、恢复来源之前用户 /title 抢先」的竞态
         self.override_after_set_session_title = None
 
-    def get_messages_as_conversation(self, session_id, include_ancestors=False):
+    def get_messages_as_conversation(self, session_id, include_ancestors=False, include_compacted=False):
         return self.messages
 
     def get_session_title(self, sid):
@@ -76,8 +71,11 @@ class FakeDB:
         self.calls.append(("set_session_title_source", source))
         self.source = source
 
-    def list_sessions_rich(self, limit=20, min_message_count=0, include_children=False):
+    def list_sessions_rich(self, limit=20, min_message_count=0, include_children=False, order_by_last_active=False):
         return self.sessions
+
+    def record_auxiliary_usage(self, session_id, task, **kwargs):
+        pass
 
 
 class FakeLlm:
@@ -1033,7 +1031,7 @@ class SessionStateDB(FakeDB):
         self.state = dict(state)
         self.calls = []
 
-    def list_sessions_rich(self, limit=20, min_message_count=0, include_children=False):
+    def list_sessions_rich(self, limit=20, min_message_count=0, include_children=False, order_by_last_active=False):
         return self.sessions
 
     def get_session_title(self, sid):
@@ -1155,12 +1153,17 @@ def test_auxiliary_usage_recorded_through_sessiondb():
     assert rec["estimated_cost_usd"] == 0.0012
 
 
-def test_auxiliary_usage_noop_without_api():
-    db = FakeDB(messages=MSGS, title="已有会话", source="llm")  # 无 record_auxiliary_usage（老宿主/测试 fake）
+def test_auxiliary_usage_failure_does_not_block_evaluation():
+    db = FakeDB(messages=MSGS, title="已有会话", source="llm")
+
+    def failing_usage(sid, task, **kw):
+        raise RuntimeError("usage store unavailable")
+
+    db.record_auxiliary_usage = failing_usage
     t, ctx = make_titler(db, text=_dec("keep"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "keep"
-    assert len(ctx.llm.calls) == 1  # 记账缺失不影响评估
+    assert len(ctx.llm.calls) == 1  # 记账失败不影响评估
 
 
 # -- 命令与生命周期注册 -------------------------------------------------------

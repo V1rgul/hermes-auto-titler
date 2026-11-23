@@ -57,6 +57,7 @@ from hermes_auto_titler.messages import (
     smart_preview,
 )
 from hermes_auto_titler.policy import AutoTitler
+from hermes_auto_titler.titler import TITLE_SOURCE_USER
 
 
 VARIANTS = ("minimal", "concise", "detailed")
@@ -289,7 +290,7 @@ def _session_candidates(db: Any, *, rng: random.Random, n: int, min_users: int, 
             continue
         try:
             source = db.get_session_title_source(str(sid))
-            if source == getattr(db, "TITLE_SOURCE_USER", "user"):
+            if source == TITLE_SOURCE_USER:
                 continue
             messages = db.get_messages_as_conversation(sid, include_ancestors=True) or []
             turns = extract_turns(messages)
@@ -308,7 +309,7 @@ def _sessions_by_id(db: Any, session_ids: Sequence[str], *, min_users: int, max_
     for sid in session_ids:
         try:
             source = db.get_session_title_source(str(sid))
-            if source == getattr(db, "TITLE_SOURCE_USER", "user"):
+            if source == TITLE_SOURCE_USER:
                 continue
             messages = db.get_messages_as_conversation(sid, include_ancestors=True) or []
             turns = extract_turns(messages)
@@ -559,9 +560,9 @@ def main() -> int:
         judge_llm, _ = _make_host_llm()
         endpoint, model = "host-owned", "title_generation"
 
-    from hermes_state import SessionDB
+    from hermes_auto_titler.host_store import open_session_store
 
-    db = SessionDB()
+    db = open_session_store()
     if args.reuse_fingerprint:
         pinned_ids = _fingerprint_from_output(args.reuse_fingerprint)
         samples = _sessions_by_id(db, pinned_ids, min_users=max(1, args.min_users), max_users=max(args.min_users, args.max_users))

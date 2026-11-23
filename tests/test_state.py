@@ -14,11 +14,6 @@ from hermes_auto_titler.titler import AutoTitler as BaseAutoTitler
 
 
 class SessionDB:
-    TITLE_SOURCE_DERIVED = "derived"
-    TITLE_SOURCE_LLM = "llm"
-    TITLE_SOURCE_USER = "user"
-    MAX_TITLE_LENGTH = 100
-
     def __init__(self, state):
         self.state = dict(state)
 
@@ -295,7 +290,7 @@ def test_runtime_failure_is_persisted_for_restart(tmp_path):
     path = tmp_path / "state.json"
 
     class MessagesDB(SessionDB):
-        def get_messages_as_conversation(self, session_id, include_ancestors=False):
+        def get_messages_as_conversation(self, session_id, include_ancestors=False, include_compacted=False):
             return [{"role": "user", "content": "测试失败恢复"}]
 
     class FailingLlm:

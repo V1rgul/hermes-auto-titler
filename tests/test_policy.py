@@ -13,18 +13,16 @@ MSGS = [
 
 
 class FakeDB:
-    TITLE_SOURCE_DERIVED = "derived"
-    TITLE_SOURCE_LLM = "llm"
-    TITLE_SOURCE_USER = "user"
-    MAX_TITLE_LENGTH = 100
-
     def __init__(self, title="旧标题", source="llm"):
         self.title = title
         self.source = source
         self.calls = []
 
-    def get_messages_as_conversation(self, sid, include_ancestors=True):
+    def get_messages_as_conversation(self, sid, include_ancestors=True, include_compacted=False):
         return MSGS
+
+    def record_auxiliary_usage(self, session_id, task, **kwargs):
+        pass
 
     def get_session_title(self, sid):
         return self.title

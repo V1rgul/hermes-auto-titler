@@ -266,7 +266,7 @@ the underlying conversation or a mapping back to it.
 
 The evolution harness deliberately calls `evaluate(force=True)` synchronously.
 It preserves pending confirmations, candidate normalization, protection checks
-and an atomic SQLite CAS boundary, but bypasses cooldown, turn-frequency and
+and the fail-closed title writes, but bypasses cooldown, turn-frequency and
 normal scheduling gates. Records state this explicitly with
 `scheduler_gates="bypassed"`. It does not test hook concurrency, close/finalize
 recovery, restart loading, live host activation or latency under normal scheduling.

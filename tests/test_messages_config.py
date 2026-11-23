@@ -51,7 +51,7 @@ class FakeDB:
     def __init__(self, conv):
         self.conv = conv
 
-    def get_messages_as_conversation(self, session_id, include_ancestors=False):
+    def get_messages_as_conversation(self, session_id, include_ancestors=False, include_compacted=False):
         return self.conv
 
 
@@ -1817,23 +1817,6 @@ def test_compacted_session_lineage_recovers_original_human_opening_from_physical
     assert summary is not None and "设计 AutoTitler 评估指标" in summary
 
 
-def test_load_context_fallback_when_db_lacks_include_compacted():
-    """测试当宿主/Mock DB 签名不支持 include_compacted 时，优雅降级而不是抛出 TypeError。"""
-    class LegacyDuckDB:
-        def __init__(self, conv):
-            self.conv = conv
-
-        def get_messages_as_conversation(self, session_id, include_ancestors=True):
-            return self.conv
-
-    legacy_db = LegacyDuckDB([
-        {"role": "user", "content": "你好"},
-        {"role": "assistant", "content": "你好！有什么我可以帮你的？"},
-    ])
-    recent, all_user, opening, summary = load_context_with_summary(
-        legacy_db, "s_legacy", recent_turns=1, include_all_user=True
-    )
-    assert opening[0] == ("user", "你好")
 
 
 def test_provenance_contrast_compacted_vs_inactive_vs_default():
@@ -2073,36 +2056,6 @@ def test_indexed_timeline_retains_compaction_summary_when_sparse_sampling_omits_
     assert "Redis worker" in summary
 
 
-def test_indexed_timeline_keeps_summary_as_fallback_on_legacy_host():
-    class LegacyDuckDB:
-        def __init__(self, conv):
-            self.conv = conv
-
-        def get_messages_as_conversation(self, session_id, include_ancestors=True):
-            return self.conv
-
-    legacy = LegacyDuckDB([
-        {
-            "role": "user",
-            "content": _real_compaction_carrier(
-                "## Historical Task Snapshot\n旧宿主只能看到摘要"
-            ),
-        },
-        {"role": "user", "content": "压缩后的继续消息"},
-    ])
-    _, _, _, summary, timeline = load_context_with_summary(
-        legacy,
-        "s1",
-        recent_turns=1,
-        include_all_user=True,
-        opening_turns=1,
-        include_timeline=True,
-    )
-
-    assert summary is not None and "旧宿主只能看到摘要" in summary
-    assert timeline["raw_history_recovered"] is False
-    assert timeline["summary_fallback"] is True
-    assert timeline["summary_supporting"] is False
 
 
 def test_indexed_timeline_10000_turns_keeps_context_selection_bounded():

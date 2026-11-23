@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- **Hermes 0.23.3 session storage**: Read and write titles through Hermes' storage interface (`persistence_assembly`); the plugin now requires Hermes 0.23.3 or later. Hermes 0.23.3 reduced `hermes_state.SessionDB` to a deprecated stand-in without the title-source constants and title-provenance methods, so every evaluation and `/autotitler rename-now` failed with `AttributeError`. The storage interface has no compare-and-set for replacing one llm title with another, so that replacement now takes the existing fail-closed two-step write. `scripts/integration_check.py` checks the plugin's store access against the running host.
+- **Hermes 0.23.3 session storage**: Read and write titles through Hermes' storage interface (`persistence_assembly`); the plugin now requires Hermes 0.23.3 or later. Hermes 0.23.3 reduced `hermes_state.SessionDB` to a deprecated stand-in without the title-source constants and title-provenance methods, so every evaluation and `/autotitler rename-now` failed with `AttributeError`. The storage interface has no compare-and-set for replacing one llm title with another, so that replacement now checks the title read before the model call and takes the fail-closed two-step write. `scripts/integration_check.py` checks the plugin's store access against the running host.
+- **Pre-0.23.3 host paths removed**: the atomic `_execute_write` replacement, the fallbacks for hosts without `include_compacted` / `order_by_last_active`, the `resolve_session_id` / `record_auxiliary_usage` availability guards, and the eval harness's `hermes_state.SessionDB` sandbox. The dev scripts open the store through `open_session_store()`.
 
 ## 0.3.1 — 2026-10-30
 

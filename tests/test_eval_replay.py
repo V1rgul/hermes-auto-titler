@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from eval.replay import (
-    is_real_session_db_available,
     make_sandbox,
     slice_prefix,
 )
@@ -192,66 +188,6 @@ def test_make_sandbox_isolation_and_no_source_mutation(tmp_path):
         sandbox_db.close()
 
 
-@pytest.mark.skipif(
-    os.environ.get("HERMES_EVAL_INTEGRATION") != "1",
-    reason="Opt-in via HERMES_EVAL_INTEGRATION=1 for host SessionDB integration smoke",
-)
-def test_real_host_sessiondb_sandbox_isolation_smoke(tmp_path):
-    """起真实子进程验证宿主 SessionDB 在独立沙箱中装载切片，无生产库写入，且 3 轮会话可见性按 1->2->3 展开。"""
-    smoke_script = f"""
-import sys
-from pathlib import Path
-
-# 加入宿主与插件路径
-sys.path.insert(0, "/Users/Vocllum/.hermes/hermes-agent")
-sys.path.insert(0, "{os.getcwd()}")
-
-from hermes_state import SessionDB
-from eval.replay import slice_prefix, make_sandbox
-
-workdir = Path("{tmp_path}") / "integration_sandbox"
-workdir.mkdir(parents=True, exist_ok=True)
-
-# 1. 创建源真实 SessionDB (也在临时目录)
-src_dir = Path("{tmp_path}") / "src_db"
-src_dir.mkdir(parents=True, exist_ok=True)
-src_db = SessionDB(db_path=src_dir / "state.db")
-src_db.create_session("s_smoke", source="cli")
-src_db.set_session_title("s_smoke", "Smoke Title")
-src_db.set_session_title_source("s_smoke", "llm")
-
-events = [
-    {{"role": "user", "content": "人类轮次 1", "timestamp": 10.0}},
-    {{"role": "assistant", "content": "助手回复 1", "timestamp": 11.0}},
-    {{"role": "user", "content": "人类轮次 2", "timestamp": 20.0}},
-    {{"role": "assistant", "content": "助手回复 2", "timestamp": 21.0}},
-    {{"role": "user", "content": "人类轮次 3", "timestamp": 30.0}},
-    {{"role": "assistant", "content": "助手回复 3", "timestamp": 31.0}},
-]
-src_db.append_messages_batch("s_smoke", events)
-
-# 2. 验证逐轮切片并制作独立沙箱
-for turn in (1, 2, 3):
-    turn_dir = workdir / f"turn_{{turn}}"
-    turn_dir.mkdir(parents=True, exist_ok=True)
-    prefix = slice_prefix(events, turn=turn)
-    s_db = make_sandbox(src_db, "s_smoke", workdir=turn_dir, events=prefix)
-    conv = s_db.get_messages_as_conversation("s_smoke")
-    user_msgs = [m for m in conv if m.get("role") == "user"]
-    assert len(user_msgs) == turn, f"Turn {{turn}} expected {{turn}} user messages, got {{len(user_msgs)}}"
-    s_db.close()
-
-src_db.close()
-print("SMOKE_PASS")
-"""
-    result = subprocess.run(
-        ["/Users/Vocllum/.hermes/hermes-agent/venv/bin/python", "-c", smoke_script],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, f"Host smoke failed with stderr: {result.stderr}"
-    assert "SMOKE_PASS" in result.stdout
 
 
 def test_replay_harness_confirmations_and_keep(tmp_path):

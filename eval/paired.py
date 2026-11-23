@@ -109,19 +109,6 @@ class _EvidenceDB:
                 if event.get("active", 1) or (include_compacted and event.get("compacted", 0))]
 
 
-class _AtomicSandbox(SandboxSqliteSessionDB):
-    def _execute_write(self, operation: Any) -> Any:
-        # Match the production CAS boundary instead of the legacy two-step fallback.
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            result = operation(self.conn)
-            self.conn.execute("COMMIT")
-            return result
-        except BaseException:
-            self.conn.execute("ROLLBACK")
-            raise
-
-
 class _LedgerLlm:
     def __init__(self, llm: Any, *, transport_kind: str) -> None:
         if transport_kind not in TRANSPORT_KINDS:
@@ -252,7 +239,7 @@ def run_evolution(case: FrozenCase, cell: PromptCell, llm: Any, workdir: str | P
     root.mkdir(parents=True, exist_ok=True)
     ledger = _LedgerLlm(llm, transport_kind=transport_kind)
     sandbox_dir = Path(tempfile.mkdtemp(prefix="paired-", dir=root))
-    db = _AtomicSandbox(sandbox_dir / "state.db")
+    db = SandboxSqliteSessionDB(sandbox_dir / "state.db")
     sid = "paired-session"
     titler = titler_class(SimpleNamespace(llm=ledger), cfg, db=db)
     titler._state_path = sandbox_dir / "state.json"

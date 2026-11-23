@@ -63,15 +63,6 @@ def slice_prefix(events: List[Dict[str, Any]], turn: int) -> List[Dict[str, Any]
     return sliced
 
 
-def is_real_session_db_available() -> bool:
-    """检查当前环境是否能使用真实的宿主 SessionDB。"""
-    try:
-        import hermes_state
-        return hasattr(hermes_state, "SessionDB") and hasattr(hermes_state.SessionDB, "create_session")
-    except Exception:
-        return False
-
-
 class SandboxSqliteSessionDB:
     """轻量 SQLite 沙箱存储。
 
@@ -80,11 +71,6 @@ class SandboxSqliteSessionDB:
     本沙箱仅存储基础字段与 active 标志，不具备生产 SessionDB 的压缩载体结构（如 compacted、
     _compressed_summary、token_count 等），不可据此声称全历史高保真回放。
     """
-
-    MAX_TITLE_LENGTH = 100
-    TITLE_SOURCE_USER = "user"
-    TITLE_SOURCE_LLM = "llm"
-    TITLE_SOURCE_DERIVED = "derived"
 
     def __init__(self, db_path: Union[str, Path]) -> None:
         self.db_path = Path(db_path)
@@ -345,11 +331,7 @@ def make_sandbox(
             events = []
 
     # 构造独立沙箱 DB
-    if is_real_session_db_available():
-        import hermes_state
-        sandbox_db = hermes_state.SessionDB(db_path=sandbox_db_path)
-    else:
-        sandbox_db = SandboxSqliteSessionDB(db_path=sandbox_db_path)
+    sandbox_db = SandboxSqliteSessionDB(db_path=sandbox_db_path)
 
     # 写入会话元数据
     sandbox_db.create_session(
@@ -452,12 +434,7 @@ class ReplayHarness:
         if db is not None:
             self.db = db
         else:
-            db_path = self.workdir / "state.db"
-            if is_real_session_db_available():
-                import hermes_state
-                self.db = hermes_state.SessionDB(db_path=db_path)
-            else:
-                self.db = SandboxSqliteSessionDB(db_path=db_path)
+            self.db = SandboxSqliteSessionDB(db_path=self.workdir / "state.db")
 
         # 独立上下文与 LLM
         self.mock_llm = mock_llm or MagicMock()

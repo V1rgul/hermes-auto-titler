@@ -102,11 +102,11 @@ on_session_end
 
 压缩历史采用 **raw-first / summary-fallback**：
 
-1. 优先调用 SessionDB 的 `include_compacted=True`，恢复 `active=0, compacted=1` 的真实历史；
+1. 以 `include_compacted=True` 读取宿主会话存储（`TranscriptView.DISPLAY`），恢复 `active=0, compacted=1` 的真实历史；
 2. `active=0, compacted=0` 的撤回 / rewind / 删除消息仍然排除；
 3. 如果压缩前真实用户轮已经恢复，且 Opening + Sampled history + Recent 覆盖了全部用户轮，则不重复发送摘要；
 4. 如果原始历史已经恢复但稀疏采样省略了部分用户轮，则摘要以 `Compaction summary (secondary evidence)` 形式保留，用来补充可能被均匀采样跳过的关键转折，但原始用户轮仍拥有时间顺序上的更高权威；
-5. 旧宿主不支持 `include_compacted`，或检测到压缩载体但原始历史无法恢复时，摘要作为 `Fallback historical summary`。
+5. 检测到压缩载体但原始历史无法恢复时，摘要作为 `Fallback historical summary`。
 
 因此摘要有两种低于原始消息的角色：原始历史缺失时的 fallback，以及稀疏采样时的 secondary evidence。
 
@@ -227,14 +227,12 @@ derived < llm < user
 - 唯一性冲突时添加递增后缀，并继续满足字符与显示宽度上限；
 - 成功自动写入后保持 `source=llm`，让以后用户手改仍拥有更高优先级。
 
-写回路径按宿主能力分两档：
+写回经由 Hermes 0.23.3 的存储接口（`hermes_auto_titler/host_store.py` 的 `SessionStore`），按当前来源分两条路径：
 
-- **现代宿主**：宿主私有 `_execute_write(fn)` 在单事务内执行 `BEGIN IMMEDIATE` → `fn(conn)` → `commit()`，事务由宿主开启与提交。llm→llm 改名的 CAS 是一条幂等 `UPDATE ... WHERE id = ? AND title IS ? AND title_source = 'llm'`，与预期快照不符时匹配 0 行并 fail-closed；回调不得自行 `commit`、不得自行开启事务。
-- **老宿主**：没有 `_execute_write` 时走严格两步 fail-closed（`set_session_title` → 回读校验 → 恢复 `source=llm`）。这是老宿主用户唯一的降级路径，不是冗余代码。
+- **无标题 / derived**：宿主 `set_auto_title` 在单个宿主事务内同时写入标题与 `source=llm`，并拒绝覆盖更高来源。
+- **llm → llm**：存储接口没有同级来源的 compare-and-set（`set_auto_title` 只覆盖更低来源），因此先核对模型调用前读到的标题，再严格两步 fail-closed（`set_session_title` → 回读校验 → 恢复 `source=llm`）。两步之间该行短暂标为 `user`；用户恰好在最后一次核对与写入之间改名时，其标题会被覆盖。
 
-决定走哪一档的是宿主能力而非插件版本，因此两档都必须长期有效。CAS 与兜底两条路径都由真实 `sqlite3` 连接、与宿主一致的 `sessions` 表和同构的 `_execute_write` 驱动（见 `tests/test_host_write_contract.py`）。
-
-本节的每条断言由 `tests/test_host_write_contract.py` 强制：删改任一档路径、让宿主回调自行提交事务，都会让对应测试转红。
+两条路径由真实 `sqlite3` 连接与宿主一致的 `sessions` 表驱动（见 `tests/test_host_write_contract.py`），插件调用的每个存储方法都必须存在于 `SessionStore`，否则该测试转红；`scripts/integration_check.py` 在临时 HERMES_HOME 中对运行中的宿主验证同一组方法。
 
 ## 10. Profile Context 与用量记账
 
@@ -353,7 +351,7 @@ The default comparison is the current prompt. Select extra variants explicitly; 
 
 1. **`first_title_mode` 的宿主副作用不可逆管理**：插件能关闭内建标题器，但不知道它原本是谁关的，也不会自动恢复。更好的长期设计是保存所有权/原值，或让宿主提供临时抑制接口。
 2. **status 不解析宿主实际路由**：默认 auxiliary 模式下只能看到 `(host default)`。
-3. **llm→llm 没有宿主级 CAS**：只能等待 Hermes 提供更合适的公开写入 API。
+3. **llm→llm 没有宿主级 CAS**：两步写入留有极小竞态窗口（见上文写回路径），只能等待 Hermes 提供同级来源的 compare-and-set 写入 API。
 4. **调度状态跨重启恢复与门禁对齐**：`state.json` 原子持久化 typed `retry` / `finalize` / `pending_review` / `counter`。`_pending`、`_failed_sessions` 与 `_rename_counts` 均可安全重建；未背书候选绝不偷跑写库，普通 `counter` 与 `pending` 记录绝不误转重试。
 5. **高 N 会带来明显更新延迟**：确认按后续评估次数计算，而评估本身还受 `every_n_turns` / `min_interval_minutes` 约束，因此不建议无理由把 `rename_confirmations` 调得很大。
 6. **改名上限持久化保护**：`max_renames_per_session` 默认关闭。设为 N 后按会话持久化累计改名次数，重启后继续生效，有效控制标题抖动与预算。

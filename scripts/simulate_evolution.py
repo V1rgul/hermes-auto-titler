@@ -14,8 +14,8 @@ from typing import Any, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_state import SessionDB
 from hermes_auto_titler.config import load_config
+from hermes_auto_titler.host_store import SessionStore, open_session_store
 from hermes_auto_titler.messages import (
     clean_captured_text,
     message_text,
@@ -130,7 +130,7 @@ def run_sequence(
         curr_agg = next_agg
 
 
-def get_real_session_turns(db: SessionDB, sid_prefix: str) -> Optional[Tuple[str, List[List[Tuple[str, str]]]]]:
+def get_real_session_turns(db: SessionStore, sid_prefix: str) -> Optional[Tuple[str, List[List[Tuple[str, str]]]]]:
     rows = list(db.list_sessions_rich(limit=500, include_children=False))
     match = [r for r in rows if r["id"].startswith(sid_prefix)]
     if not match:
@@ -209,7 +209,7 @@ def main():
     run_sequence("场景二：从旧项目平滑渐进转向新项目（多轮渐进式转题）", seq_pivot, titler_cons, titler_agg)
 
     # 3. 真实会话回放: 20260912_164543_ (Hermes 插件 Hub 提交 -> 插件清理与浏览器注入)
-    db = SessionDB()
+    db = open_session_store()
     real_data = get_real_session_turns(db, "20260912_164543")
     if real_data:
         title, turns = real_data

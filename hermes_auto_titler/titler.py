@@ -576,11 +576,6 @@ class AutoTitler:
             rows = self.db.list_sessions_rich(
                 limit=200, include_children=False, order_by_last_active=True
             )
-        except TypeError:
-            try:
-                rows = self.db.list_sessions_rich(limit=200, include_children=False)
-            except Exception:
-                return
         except Exception:
             return
         now = time.monotonic()
@@ -1632,7 +1627,7 @@ class AutoTitler:
         """实际写库 + 状态清理。title 必须是已 _prepare_candidate 的候选。"""
         # _do_evaluate() 已在模型调用前检查过一次；这里再检查一次，覆盖
         # review/pending 和并发评估之间的窗口。锁只保护插件计数，不替代
-        # SessionDB 自己的写入 CAS。
+        # _write 每次写入前的来源与标题复核。
         active_claim = claim_epoch if claim_epoch is not None else 0
         if not bypass_limit:
             current = expected_title
@@ -1740,22 +1735,18 @@ class AutoTitler:
         raise NotImplementedError("Title decision policy must be provided by policy.AutoTitler")
 
     def _record_usage(self, session_id: Optional[str], res: Any) -> None:
-        """把真实 PluginLlm 调用记入 SessionDB.record_auxiliary_usage。
+        """把真实 PluginLlm 调用记入宿主存储的 record_auxiliary_usage。
 
         必须手动记账：宿主 PluginLlm 以 task=None 调 auxiliary_client，环境
         记账不会把它归到 hermes_auto_titler 任务（上游 #23270 的任务维度统计
         依赖显式 task 参数）。task='hermes_auto_titler'，进 dashboard 的任务
-        维度统计。老宿主 / 测试 fake 没有该 API 或 usage 字段时静默跳过，
-        绝不阻断评估。
+        维度统计。记账失败只记 debug 日志，绝不阻断评估。
         """
         if not session_id:
             return
-        rec = getattr(self.db, "record_auxiliary_usage", None)
-        if not callable(rec):
-            return
         usage = getattr(res, "usage", None) or {}
         try:
-            rec(
+            self.db.record_auxiliary_usage(
                 session_id,
                 "hermes_auto_titler",
                 model=getattr(res, "model", None) or self.cfg.get("model") or None,
@@ -1842,31 +1833,14 @@ class AutoTitler:
             if src == TITLE_SOURCE_USER:
                 return False
 
-            # llm → llm：执行真正的单事务原子 CAS，杜绝 TOCTOU 竞态。
-            # 直接在 SQLite 事务中基于进入 _write 前读取到的 expected 快照比较并写入：
-            # UPDATE sessions SET title = ?, title_source = ?
-            # WHERE id = ? AND title IS ? AND title_source = 'llm'
-            # 若用户在 LLM 推理期间手动改名（或外部写入改变了 title/source），更新匹配 0 行直接失败（返回 False），
-            # 绝对不覆盖用户手改标题，也杜绝了分步 write -> readback -> restore 之间的非原子漏洞。
-            expected = expected_title if expected_title is not None else db.get_session_title(session_id)
-            def _atomic_llm_cas(conn):
-                return conn.execute(
-                    "UPDATE sessions SET title = ?, title_source = ? "
-                    "WHERE id = ? AND title IS ? AND title_source = ?",
-                    (t, TITLE_SOURCE_LLM, session_id, expected, TITLE_SOURCE_LLM),
-                ).rowcount > 0
-
-            exec_write = getattr(db, "_execute_write", None)
-            if callable(exec_write):
+            # llm → llm：存储接口没有比较并写入的原子操作（set_auto_title 只覆盖更低来源），因此先核对进入 _write 前读到的标题快照，LLM 推理期间被外部改名则放弃，再严格两步 fail-closed 写入（用户标题 → 回读 → 恢复 llm 来源）。
+            if expected_title is not None:
                 try:
-                    return bool(exec_write(_atomic_llm_cas))
+                    if db.get_session_title(session_id) != expected_title:
+                        return False
                 except Exception as e:
-                    if _is_title_conflict(e, t):
-                        raise
-                    log.warning("auto-titler %s: atomic llm CAS execution failed: %s", session_id[:12], e)
+                    log.warning("auto-titler %s: failed to read title before write, failing closed: %s", session_id[:12], e)
                     return False
-
-            # 后备路径（极老宿主无 _execute_write 时）：严格两步 fail-closed
             if db.set_session_title(session_id, t):
                 try:
                     stored = db.get_session_title(session_id)
