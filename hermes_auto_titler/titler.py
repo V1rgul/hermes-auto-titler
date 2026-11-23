@@ -36,19 +36,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    # 宿主提供 profile home 解析；hermes_state 的同名函数是 0.23.3 起弃用的转发，极老宿主两者都没有时退回 HERMES_HOME 环境变量
-    from hermes_constants import get_hermes_home
-except ImportError:
-    try:
-        from hermes_state import get_hermes_home
-    except ImportError:  # pragma: no cover
-        def get_hermes_home():  # type: ignore[misc]
-            import os
-            from pathlib import Path
-            return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+from hermes_constants import get_hermes_home
 
-from .host_store import open_session_store
+from .host_store import SessionStore, open_session_store
 from .messages import load_context_with_summary
 from .state import StateStore
 
@@ -62,7 +52,7 @@ MAX_TITLE_LENGTH = 100
 
 # 按 hermes home 路径缓存 SessionDB：同一 profile 复用句柄（含双重检查锁），
 # 不同 profile 各建各的，避免模块级单例把首个 profile 的 DB 泄露给后续 profile。
-_dbs: Dict[str, Any] = {}
+_dbs: Dict[str, SessionStore] = {}
 _db_lock = threading.Lock()
 
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
@@ -206,7 +196,7 @@ def migrate_legacy_state() -> None:
         log.warning("auto-titler legacy state cleanup failed: %s", exc)
 
 
-def get_db() -> Any:
+def get_db() -> SessionStore:
     key = str(get_hermes_home())
     db = _dbs.get(key)
     if db is not None:
@@ -332,7 +322,7 @@ def _retry_delay(retry_class: str, class_attempts: int) -> int:
 
 
 class AutoTitler:
-    def __init__(self, ctx, cfg: dict[str, Any], db: Any = None):
+    def __init__(self, ctx, cfg: dict[str, Any], db: SessionStore | None = None):
         self.ctx = ctx
         self.cfg = cfg
         self._db = db
@@ -379,7 +369,7 @@ class AutoTitler:
         self._state_path = state_path()
 
     @property
-    def db(self) -> Any:
+    def db(self) -> SessionStore:
         return self._db or get_db()
 
     # -- hook 入口 ----------------------------------------------------------
@@ -1631,7 +1621,7 @@ class AutoTitler:
 
     def _commit_rename(
         self,
-        db: Any,
+        db: SessionStore,
         session_id: str,
         title: str,
         expected_title: Optional[str] = None,
@@ -1801,7 +1791,7 @@ class AutoTitler:
             return None
         return t
 
-    def _protected_reason(self, db: Any, session_id: str) -> Optional[str]:
+    def _protected_reason(self, db: SessionStore, session_id: str) -> Optional[str]:
         """写回前的权威性复核（LLM 调用期间用户可能 /title 或出现 legacy 标题）。
 
         返回非 None 表示当前标题受保护，写回必须放弃。
@@ -1821,7 +1811,7 @@ class AutoTitler:
                 return "legacy title (NULL provenance) is protected"
         return None
 
-    def _write(self, db: Any, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
+    def _write(self, db: SessionStore, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
         title = self._prepare_candidate(title)
         if not title:
             return None

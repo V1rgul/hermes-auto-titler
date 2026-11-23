@@ -1,6 +1,6 @@
 """真实宿主会话存储集成验证：通过插件的 open_session_store 检查标题来源、更新、唯一性、对话读取与列表行为。
 
-Run with the Hermes interpreter; it works on hosts with the storage interface (Hermes 0.23.3+) and on older hosts with hermes_state.SessionDB. The store lives in a temporary HERMES_HOME, never in a real profile.
+Run with the Hermes interpreter (Hermes 0.23.3+). The store lives in a temporary HERMES_HOME, never in a real profile.
 """
 
 import os
@@ -13,20 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def _seed(sessions):
     """Create the sessions and transcripts through the host's own write API."""
-    try:
-        from persistence_assembly import open_persistence, profile_scope
-    except ImportError:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-        try:
-            for sid, messages in sessions.items():
-                db.create_session(sid, source="cli")
-                for role, content in messages:
-                    db.append_message(sid, role=role, content=content)
-        finally:
-            db.close()
-        return
+    from persistence_assembly import open_persistence, profile_scope
     from persistence.conversation.messages import NewMessage
     from persistence.conversation.sessions import NewSession
 

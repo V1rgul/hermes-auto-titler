@@ -128,7 +128,7 @@ model: "your-model"         # any model your Hermes setup can reach
 
 **Model guidance.** The plugin runs well on small, fast instruction-following models. Prioritize consistent JSON output, multilingual comprehension, and prompt adherence over heavy reasoning. Start with Hermes' normal auxiliary title route. Before deploying an ultra-light model, test `scripts/review_sample.py` against your own session history — if you see topic drift, invalid JSON, or degraded multilingual titles on long or compacted sessions, switch to a more capable model.
 
-**Requirements:** Python ≥ 3.11 · a recent Hermes Agent.
+**Requirements:** Python ≥ 3.11 · Hermes Agent 0.23.3 or later.
 
 > **Title ownership note:** `first_title_mode` is a startup-level setting (default `builtin`): Hermes owns the first-turn title and the plugin starts from its multi-turn evolution. Set `first_title_mode: plugin` if you want the plugin to evaluate from turn 1. Neither mode ever writes host configuration, so disabling or deleting the plugin leaves Hermes' own title generator fully intact.
 >

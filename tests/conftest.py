@@ -6,17 +6,18 @@ from pathlib import Path
 
 import pytest
 
-# hermes_state.SessionDB（titler.py 只需要类型）
-fake_state = types.ModuleType("hermes_state")
+# hermes_constants.get_hermes_home（titler.py 解析 profile home；与宿主一致，按调用时的 HERMES_HOME 解析）
+fake_constants = types.ModuleType("hermes_constants")
 
 
-# No title constants: Hermes 0.23.3's deprecated SessionDB no longer carries TITLE_SOURCE_* or MAX_TITLE_LENGTH, so the plugin must not read them from it.
-class SessionDB:
-    pass
+def get_hermes_home():
+    import os
+
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 
 
-fake_state.SessionDB = SessionDB
-sys.modules.setdefault("hermes_state", fake_state)
+fake_constants.get_hermes_home = get_hermes_home
+sys.modules.setdefault("hermes_constants", fake_constants)
 
 # hermes_cli.config（语言解析 / takeover 配置测试需要宿主模块名存在）
 fake_cli = types.ModuleType("hermes_cli")

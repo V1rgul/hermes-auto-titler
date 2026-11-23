@@ -128,7 +128,7 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 
 **模型建议。** 插件在小型、快速的指令遵循模型上即可高效运行。优先关注一致的 JSON 输出、多语言理解和指令遵循，而非重型推理能力。建议先用 Hermes 原有的 `title_generation` 辅助通道。部署超轻量模型前，先用 `scripts/review_sample.py` 对自己的会话历史做评估——出现主题漂移、JSON 格式错误或长会话中的多语言标题质量下降时，换到更强的辅助模型。
 
-**要求：** Python ≥ 3.11 · 较新版本的 Hermes Agent。
+**要求：** Python ≥ 3.11 · Hermes Agent 0.23.3 或更高版本。
 
 > **标题所有权注意：** `first_title_mode` 是加载期生效的配置（默认 `builtin`）：首轮标题由 Hermes 生成，插件从多轮演化阶段开始维护。若想让插件从第 1 轮就参与评估，设为 `first_title_mode: plugin`。两种模式都不写任何宿主配置，因此停用或删除插件不会影响 Hermes 自己的标题生成器。
 >

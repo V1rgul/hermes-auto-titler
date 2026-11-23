@@ -1,31 +1,30 @@
-"""Session-store access across Hermes versions.
+"""The plugin's access to Hermes' session store (Hermes 0.23.3+).
 
-Hermes 0.23.3 moved session storage behind ``persistence_assembly`` and reduced ``hermes_state.SessionDB`` to a deprecated stand-in without the title-provenance reads and writes the plugin needs; ``hermes_state`` is removed no earlier than v0.27.0. ``open_session_store`` returns an object with the ``SessionDB`` method names the plugin calls, backed by the storage interface when the host has it and by the old class otherwise.
+Hermes 0.23.3 moved session storage behind ``persistence_assembly``; ``hermes_state.SessionDB`` is a deprecated stand-in without the title-provenance reads and writes the plugin needs. ``SessionStore`` gives the titler the session operations it uses over a storage-interface handle. Host modules are imported on use so the unit tests run without a Hermes checkout.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from persistence_assembly import Persistence
 
 
-def open_session_store() -> Any:
+def open_session_store() -> SessionStore:
     """The current profile's session store, released with ``close()``."""
-    try:
-        from persistence_assembly import open_persistence, profile_scope
-    except ImportError:
-        from hermes_state import SessionDB
+    from persistence_assembly import open_persistence, profile_scope
 
-        return SessionDB()
-    return StorageInterfaceStore(open_persistence(profile_scope(), eager=True))
+    return SessionStore(open_persistence(profile_scope(), eager=True))
 
 
-class StorageInterfaceStore:
-    """``SessionDB``'s method names over a ``persistence_assembly`` handle.
+class SessionStore:
+    """The titler's session operations over a ``persistence_assembly`` handle.
 
     It has no ``_execute_write``: the storage interface offers no compare-and-set that replaces one llm title with another, so the titler takes its fail-closed two-step write instead (user title, read back, then llm provenance).
     """
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Persistence) -> None:
         self._store = store
 
     def close(self) -> None:
