@@ -15,11 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_state import SessionDB
-
 from hermes_auto_titler.config import VALID_STRATEGIES, load_config
+from hermes_auto_titler.host_store import open_session_store
 from hermes_auto_titler.messages import load_context_with_summary
-from hermes_auto_titler.titler import AutoTitler
+from hermes_auto_titler.titler import TITLE_SOURCE_USER, AutoTitler
 
 SHOW = 10
 TRUNC = 120
@@ -51,7 +50,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    db = SessionDB()
+    db = open_session_store()
     cfg = load_config()
     if args.strategy:
         cfg["strategy"] = args.strategy
@@ -68,7 +67,7 @@ def main():
             tsrc = db.get_session_title_source(sid)
         except Exception:
             tsrc = None
-        if tsrc == SessionDB.TITLE_SOURCE_USER:
+        if tsrc == TITLE_SOURCE_USER:
             skipped_user += 1
             continue
         picked.append((row, tsrc))

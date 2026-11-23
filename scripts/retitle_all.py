@@ -11,10 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hermes_state import SessionDB
-
 from hermes_auto_titler.config import load_config
-from hermes_auto_titler.titler import AutoTitler
+from hermes_auto_titler.host_store import open_session_store
+from hermes_auto_titler.titler import TITLE_SOURCE_USER, AutoTitler
 
 
 class Ctx:
@@ -33,7 +32,7 @@ def main():
     ap.add_argument("--min-messages", type=int, default=0)
     args = ap.parse_args()
 
-    db = SessionDB()
+    db = open_session_store()
     cfg = load_config()
     titler = AutoTitler(Ctx(), cfg, db=db)
 
@@ -56,7 +55,7 @@ def main():
         except Exception:
             src = None
         title = row.get("title") or ""
-        if src == SessionDB.TITLE_SOURCE_USER:
+        if src == TITLE_SOURCE_USER:
             user_cnt += 1
             continue
         if src is None and title:

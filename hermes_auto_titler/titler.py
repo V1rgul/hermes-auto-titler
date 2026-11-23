@@ -36,25 +36,33 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_state import SessionDB
-
 try:
-    # 宿主提供 profile home 解析；极老宿主没有时退回 HERMES_HOME 环境变量
-    from hermes_state import get_hermes_home
-except ImportError:  # pragma: no cover
-    def get_hermes_home():  # type: ignore[misc]
-        import os
-        from pathlib import Path
-        return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    # 宿主提供 profile home 解析；hermes_state 的同名函数是 0.23.3 起弃用的转发，极老宿主两者都没有时退回 HERMES_HOME 环境变量
+    from hermes_constants import get_hermes_home
+except ImportError:
+    try:
+        from hermes_state import get_hermes_home
+    except ImportError:  # pragma: no cover
+        def get_hermes_home():  # type: ignore[misc]
+            import os
+            from pathlib import Path
+            return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 
+from .host_store import open_session_store
 from .messages import load_context_with_summary
 from .state import StateStore
 
 log = logging.getLogger(__name__)
 
+# Hermes 0.23.3 dropped these constants from hermes_state.SessionDB and exports no public copy of TITLE_SOURCE_USER. The title sources are the values stored in sessions.title_source, which Hermes cannot change without a data migration, and MAX_TITLE_LENGTH mirrors the cap Hermes enforces on writes, so spelling them out keeps the plugin working across hosts.
+TITLE_SOURCE_DERIVED = "derived"
+TITLE_SOURCE_LLM = "llm"
+TITLE_SOURCE_USER = "user"
+MAX_TITLE_LENGTH = 100
+
 # 按 hermes home 路径缓存 SessionDB：同一 profile 复用句柄（含双重检查锁），
 # 不同 profile 各建各的，避免模块级单例把首个 profile 的 DB 泄露给后续 profile。
-_dbs: Dict[str, SessionDB] = {}
+_dbs: Dict[str, Any] = {}
 _db_lock = threading.Lock()
 
 # Hermes 内部平台：cron（定时任务）与 subagent（子代理）的轮次不参与标题评估
@@ -198,7 +206,7 @@ def migrate_legacy_state() -> None:
         log.warning("auto-titler legacy state cleanup failed: %s", exc)
 
 
-def get_db() -> SessionDB:
+def get_db() -> Any:
     key = str(get_hermes_home())
     db = _dbs.get(key)
     if db is not None:
@@ -206,7 +214,7 @@ def get_db() -> SessionDB:
     with _db_lock:
         db = _dbs.get(key)
         if db is None:
-            db = SessionDB()
+            db = open_session_store()
             _dbs[key] = db
     return db
 
@@ -324,7 +332,7 @@ def _retry_delay(retry_class: str, class_attempts: int) -> int:
 
 
 class AutoTitler:
-    def __init__(self, ctx, cfg: dict[str, Any], db: SessionDB | None = None):
+    def __init__(self, ctx, cfg: dict[str, Any], db: Any = None):
         self.ctx = ctx
         self.cfg = cfg
         self._db = db
@@ -371,7 +379,7 @@ class AutoTitler:
         self._state_path = state_path()
 
     @property
-    def db(self) -> SessionDB:
+    def db(self) -> Any:
         return self._db or get_db()
 
     # -- hook 入口 ----------------------------------------------------------
@@ -524,13 +532,13 @@ class AutoTitler:
             try:
                 src = self.db.get_session_title_source(sid)
                 if finalize_claim is None:
-                    if src == SessionDB.TITLE_SOURCE_USER:
+                    if src == TITLE_SOURCE_USER:
                         to_remove.append(sid)
                         continue
                     cur_title = self.db.get_session_title(sid)
                     if (
                         cur_title
-                        and src == SessionDB.TITLE_SOURCE_LLM
+                        and src == TITLE_SOURCE_LLM
                         and not self._pending.get(sid)
                     ):
                         to_remove.append(sid)
@@ -597,13 +605,13 @@ class AutoTitler:
                     title = self.db.get_session_title(sid)
                 except Exception:
                     continue
-                if src == SessionDB.TITLE_SOURCE_USER:
+                if src == TITLE_SOURCE_USER:
                     continue
                 if src is None and title:
                     continue
-                if title and src == SessionDB.TITLE_SOURCE_LLM:
+                if title and src == TITLE_SOURCE_LLM:
                     continue
-                if title and src != SessionDB.TITLE_SOURCE_DERIVED:
+                if title and src != TITLE_SOURCE_DERIVED:
                     continue
                 self._failed_sessions[sid] = {
                     "attempts": 0,
@@ -654,9 +662,9 @@ class AutoTitler:
             src = self.db.get_session_title_source(session_id)
         except Exception:
             return False
-        if src == SessionDB.TITLE_SOURCE_USER:
+        if src == TITLE_SOURCE_USER:
             return False
-        if src == SessionDB.TITLE_SOURCE_DERIVED:
+        if src == TITLE_SOURCE_DERIVED:
             return True
         if src is None:
             try:
@@ -1155,7 +1163,7 @@ class AutoTitler:
             try:
                 base_title = raw.get("base_title")
                 base_title_known = raw.get("base_title_known", True)
-                if source == SessionDB.TITLE_SOURCE_USER:
+                if source == TITLE_SOURCE_USER:
                     continue
                 if base_title_known and current != base_title:
                     continue
@@ -1344,7 +1352,7 @@ class AutoTitler:
             src = db.get_session_title_source(session_id)
         except Exception:
             src = None
-        if src == SessionDB.TITLE_SOURCE_USER:
+        if src == TITLE_SOURCE_USER:
             # 用户权威变化使任何 stale 候选失效并移出重试账本
             self._pending.pop(session_id, None)
             with self._retry_lock:
@@ -1438,12 +1446,12 @@ class AutoTitler:
         # derived 是 Hermes 从首条用户消息截出的临时兜底，说明原生标题 LLM
         # 尚未成功升级；未命名的会话（current is None/empty）更必须生成标题。
         # 因此只要无标题或仍是 derived，或首回合 end 覆盖，就强制要求本次模型给出正式标题（rename-only）。
-        force_rename = not current or src == SessionDB.TITLE_SOURCE_DERIVED or first_turn_override
+        force_rename = not current or src == TITLE_SOURCE_DERIVED or first_turn_override
         # 评审协议：0 = 关闭（单轮评估直接改名写库）；
         # 1 = 确认 1 次（第 1 轮产生候选 pending，第 2 轮模型觉得上一轮改名可以则 approve 采用落库）；
         # derived/无标题升级、blind 终局评估及首回合 end 覆盖旁路直接提交。
         needed = 0 if (blind or first_turn_override) else int(self.cfg.get("rename_confirmations", 0))
-        review = needed >= 1 and src == SessionDB.TITLE_SOURCE_LLM and bool(current)
+        review = needed >= 1 and src == TITLE_SOURCE_LLM and bool(current)
         pending = self._pending.get(session_id) if review else None
         proposed = pending["title"] if pending else None
         if blind or first_turn_override:
@@ -1623,7 +1631,7 @@ class AutoTitler:
 
     def _commit_rename(
         self,
-        db: SessionDB,
+        db: Any,
         session_id: str,
         title: str,
         expected_title: Optional[str] = None,
@@ -1789,11 +1797,11 @@ class AutoTitler:
         """Clean the title without cropping it; reject empty or over-cap content."""
         t = self._clean_title(title)
         t = re.sub(r"[\s\"'“”‘’「」『』.。!！?？,，;；:：…]+$", "", t)
-        if not t or len(t) > SessionDB.MAX_TITLE_LENGTH:
+        if not t or len(t) > MAX_TITLE_LENGTH:
             return None
         return t
 
-    def _protected_reason(self, db: SessionDB, session_id: str) -> Optional[str]:
+    def _protected_reason(self, db: Any, session_id: str) -> Optional[str]:
         """写回前的权威性复核（LLM 调用期间用户可能 /title 或出现 legacy 标题）。
 
         返回非 None 表示当前标题受保护，写回必须放弃。
@@ -1802,7 +1810,7 @@ class AutoTitler:
             src = db.get_session_title_source(session_id)
         except Exception:
             return None
-        if src == SessionDB.TITLE_SOURCE_USER:
+        if src == TITLE_SOURCE_USER:
             return "user title is authoritative (set during evaluation)"
         if src is None:
             try:
@@ -1813,7 +1821,7 @@ class AutoTitler:
                 return "legacy title (NULL provenance) is protected"
         return None
 
-    def _write(self, db: SessionDB, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
+    def _write(self, db: Any, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
         title = self._prepare_candidate(title)
         if not title:
             return None
@@ -1836,12 +1844,12 @@ class AutoTitler:
             # 无标题 / derived → llm：set_auto_title 是单事务 CAS（title +
             # source 一起写），原子，无 crash window；legacy NULL 由上游按
             # user 权威拒绝。
-            if src is None or src == SessionDB.TITLE_SOURCE_DERIVED:
+            if src is None or src == TITLE_SOURCE_DERIVED:
                 return bool(
-                    db.set_auto_title(session_id, t, source=SessionDB.TITLE_SOURCE_LLM)
+                    db.set_auto_title(session_id, t, source=TITLE_SOURCE_LLM)
                 )
             # 来源在我们检查后变成了 user：永不覆盖用户标题
-            if src == SessionDB.TITLE_SOURCE_USER:
+            if src == TITLE_SOURCE_USER:
                 return False
 
             # llm → llm：执行真正的单事务原子 CAS，杜绝 TOCTOU 竞态。
@@ -1855,7 +1863,7 @@ class AutoTitler:
                 return conn.execute(
                     "UPDATE sessions SET title = ?, title_source = ? "
                     "WHERE id = ? AND title IS ? AND title_source = ?",
-                    (t, SessionDB.TITLE_SOURCE_LLM, session_id, expected, SessionDB.TITLE_SOURCE_LLM),
+                    (t, TITLE_SOURCE_LLM, session_id, expected, TITLE_SOURCE_LLM),
                 ).rowcount > 0
 
             exec_write = getattr(db, "_execute_write", None)
@@ -1879,7 +1887,7 @@ class AutoTitler:
                     log.warning("auto-titler %s: stored title %r != expected %r, aborting source recovery", session_id[:12], stored, t)
                     return False
                 try:
-                    res_src = db.set_session_title_source(session_id, SessionDB.TITLE_SOURCE_LLM)
+                    res_src = db.set_session_title_source(session_id, TITLE_SOURCE_LLM)
                     if res_src is False:
                         log.warning("auto-titler %s: set_session_title_source returned False, failing closed", session_id[:12])
                         return False
@@ -1892,7 +1900,7 @@ class AutoTitler:
         for i in range(1, 20):
             cand = title if i == 1 else f"{title} ({i})"
             # Never cut an identifier or prefix to make room for a suffix.
-            if len(cand) > SessionDB.MAX_TITLE_LENGTH:
+            if len(cand) > MAX_TITLE_LENGTH:
                 return None
             try:
                 if apply(cand):
@@ -1928,7 +1936,7 @@ class AutoTitler:
                 src = db.get_session_title_source(sid)
             except Exception:
                 src = None
-            if src == SessionDB.TITLE_SOURCE_USER:
+            if src == TITLE_SOURCE_USER:
                 results.append({"session_id": sid, "action": "skipped", "reason": "user title"})
                 continue
             if dry_run:

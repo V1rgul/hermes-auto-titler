@@ -6,15 +6,13 @@ from pathlib import Path
 
 import pytest
 
-# hermes_state.SessionDB（titler.py 需要常量与类型）
+# hermes_state.SessionDB（titler.py 只需要类型）
 fake_state = types.ModuleType("hermes_state")
 
 
+# No title constants: Hermes 0.23.3's deprecated SessionDB no longer carries TITLE_SOURCE_* or MAX_TITLE_LENGTH, so the plugin must not read them from it.
 class SessionDB:
-    TITLE_SOURCE_DERIVED = "derived"
-    TITLE_SOURCE_LLM = "llm"
-    TITLE_SOURCE_USER = "user"
-    MAX_TITLE_LENGTH = 100
+    pass
 
 
 fake_state.SessionDB = SessionDB

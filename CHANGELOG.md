@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Hermes 0.23.3 session storage**: Read and write titles through Hermes' storage interface (`persistence_assembly`) when the host has it, keeping `hermes_state.SessionDB` for older hosts. Hermes 0.23.3 reduced `SessionDB` to a deprecated stand-in without the title-source constants and title-provenance methods, so every evaluation and `/autotitler rename-now` failed with `AttributeError`. The storage interface has no compare-and-set for replacing one llm title with another, so that replacement now takes the existing fail-closed two-step write. `scripts/integration_check.py` checks the plugin's store access against the running host.
+
 ## 0.3.1 — 2026-10-30
 
 - **Recognition-oriented titles**: Keep accurate titles unchanged, name the sustained subject and desired outcome, and avoid letting incidental troubleshooting replace the session's purpose. The minimal, concise and detailed prompt presets keep their distinct emphasis while retaining the goal of recognizing a session later.
