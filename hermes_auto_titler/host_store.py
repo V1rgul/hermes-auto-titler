@@ -5,23 +5,24 @@ Hermes 0.23.3 moved session storage behind ``persistence_assembly``; ``hermes_st
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from persistence_assembly import Persistence
 
 
-def open_session_store() -> SessionStore:
-    """The current profile's session store, released with ``close()``."""
+def open_session_store(home: Optional[Path] = None) -> SessionStore:
+    """The session store of the profile at ``home`` (default: the current one), released with ``close()``."""
     from persistence_assembly import open_persistence, profile_scope
 
-    return SessionStore(open_persistence(profile_scope(), eager=True))
+    return SessionStore(open_persistence(profile_scope(home=home), eager=True))
 
 
 class SessionStore:
     """The titler's session operations over a ``persistence_assembly`` handle.
 
-    It has no ``_execute_write``: the storage interface offers no compare-and-set that replaces one llm title with another, so the titler takes its fail-closed two-step write instead (user title, read back, then llm provenance).
+    Titles are written only through ``set_auto_title``, the host's compare-and-set that refuses a higher provenance; replacing an llm title first downgrades it to derived with ``set_session_title_source``.
     """
 
     def __init__(self, store: Persistence) -> None:
@@ -33,15 +34,21 @@ class SessionStore:
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         return self._store.sessions.resolve_id(session_id_or_prefix)
 
+    def sanitize_title(self, title: str) -> Optional[str]:
+        """The form the store keeps (``None`` when nothing printable remains); raises ``ValueError`` past the length cap."""
+        from persistence.conversation.sessions import sanitize_title
+
+        return sanitize_title(title)
+
+    def title_holder(self, title: str, *, excluding: str) -> Optional[str]:
+        return self._store.sessions.title_holder(title, excluding=excluding)
+
     def get_session_title(self, session_id: str) -> Optional[str]:
         return self._store.sessions.get_title(session_id)
 
     def get_session_title_source(self, session_id: str) -> Optional[str]:
         source = self._store.sessions.get_title_source(session_id)
         return None if source is None else source.value
-
-    def set_session_title(self, session_id: str, title: str) -> bool:
-        return self._store.sessions.set_title(session_id, title)
 
     def set_session_title_source(self, session_id: str, source: str) -> bool:
         from persistence.conversation.sessions import TitleSource
@@ -69,7 +76,9 @@ class SessionStore:
             min_message_count=min_message_count,
             order=SessionOrder.LAST_ACTIVE if order_by_last_active else SessionOrder.STARTED_AT,
         )
-        return [entry.as_list_row() for entry in self._store.sessions.list_sessions(query, SessionWindow(limit=limit))]
+        # A negative limit means every session, as the old SQLite LIMIT did; the window takes None for that.
+        window = SessionWindow(limit=None if limit is not None and limit < 0 else limit)
+        return [entry.as_list_row() for entry in self._store.sessions.list_sessions(query, window)]
 
     def record_auxiliary_usage(
         self,

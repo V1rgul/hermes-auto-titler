@@ -1,6 +1,6 @@
 """真实端到端验证：PluginLlm（宿主配置的模型）+ 真实 SessionDB + 指定会话。
 
-用法: <your-hermes-venv>/bin/python scripts/e2e_check.py [session_id]
+用法: PYTHONPATH=<your-hermes-checkout> <your-hermes-venv>/bin/python scripts/e2e_check.py [session_id]
 （不传 session_id 时取最近活跃会话）
 """
 
@@ -27,10 +27,11 @@ def main():
     db = open_session_store()
     sid = sys.argv[1] if len(sys.argv) > 1 else None
     if not sid:
-        row = db._conn.execute(
-            "SELECT session_id FROM messages ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        sid = row["session_id"]
+        rows = db.list_sessions_rich(limit=1, include_children=False, order_by_last_active=True)
+        if not rows:
+            db.close()
+            raise SystemExit("没有可评估的会话")
+        sid = rows[0]["id"]
     print(f"目标会话: {sid}")
     print(f"原标题: {db.get_session_title(sid)!r} 来源: {db.get_session_title_source(sid)!r}")
 

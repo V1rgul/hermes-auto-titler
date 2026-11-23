@@ -28,8 +28,8 @@ class FakeDB:
         self.conflict_titles = conflict_titles or set()
         self.sessions = sessions or []
         self.calls = []
-        # 模拟「插件 set_session_title 之后、恢复来源之前用户 /title 抢先」的竞态
-        self.override_after_set_session_title = None
+        # 模拟「插件把 llm 标题降为 derived 之后、set_auto_title 之前用户 /title 抢先」的竞态
+        self.override_after_downgrade = None
 
     def get_messages_as_conversation(self, session_id, include_ancestors=False, include_compacted=False):
         return self.messages
@@ -44,6 +44,12 @@ class FakeDB:
         if title in self.conflict_titles:
             raise ValueError(f"Title '{title}' is already in use by session 123")
 
+    def sanitize_title(self, title):
+        return " ".join(title.split()) or None
+
+    def title_holder(self, title, *, excluding):
+        return "123" if title in self.conflict_titles else None
+
     def set_auto_title(self, sid, title, *, source):
         self.calls.append(("set_auto_title", title, source))
         self._check_conflict(title)
@@ -56,20 +62,14 @@ class FakeDB:
             return True
         return False
 
-    def set_session_title(self, sid, title):
-        self.calls.append(("set_session_title", title))
-        self._check_conflict(title)
-        if self.title == title:
-            return False
-        self.title = title
-        self.source = "user"  # 模拟上游：user 级写
-        if self.override_after_set_session_title:
-            self.title, self.source = self.override_after_set_session_title
-        return True
-
     def set_session_title_source(self, sid, source):
         self.calls.append(("set_session_title_source", source))
+        if self.title is None:
+            return False
         self.source = source
+        if source == "derived" and self.override_after_downgrade:
+            self.title, self.source = self.override_after_downgrade
+        return True
 
     def list_sessions_rich(self, limit=20, min_message_count=0, include_children=False, order_by_last_active=False):
         return self.sessions
@@ -205,8 +205,7 @@ def test_auto_title_can_be_updated_and_stays_llm():
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     assert db.title == "Test 空转排查"
-    assert ("set_session_title", "Test 空转排查") in db.calls
-    assert ("set_session_title_source", "llm") in db.calls  # 恢复可升级性
+    assert db.source == "llm"  # 保持可升级性：以后用户手改仍然优先
 
 
 def test_keep_does_not_write():
@@ -688,37 +687,60 @@ def test_blind_untitled_rename_is_still_written():
 
 
 def test_derived_rename_uses_atomic_set_auto_title():
-    # derived → llm 是权威升级：必须走 set_auto_title（单事务），
-    # 不出现两步写的 crash window
+    # derived → llm 是权威升级：直接走 set_auto_title（单事务），不需要先降级
     db = FakeDB(messages=MSGS, title="旧标题", source="derived")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
     auto_calls = [c for c in db.calls if c[0] == "set_auto_title"]
     assert auto_calls and auto_calls[0][1] == "新标题" and auto_calls[0][2] == "llm"
-    assert not any(c[0] == "set_session_title" for c in db.calls)
+    assert not any(c[0] == "set_session_title_source" for c in db.calls)
 
 
-def test_llm_rename_uses_two_step_with_source_restore():
-    # llm → llm：set_auto_title 同级 no-op，走 set_session_title + 恢复 llm 来源
+def test_llm_rename_downgrades_then_writes_through_set_auto_title():
+    # llm → llm：set_auto_title 同级 no-op，先降为 derived，再由同一个宿主 CAS 写入；成功后无需再恢复来源
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"))
     r = t.evaluate("s1", force=True)
     assert r["action"] == "renamed"
-    assert ("set_session_title", "新标题") in db.calls
-    assert ("set_session_title_source", "llm") in db.calls
+    writes = [c for c in db.calls if c[0] in ("set_session_title_source", "set_auto_title")]
+    assert writes == [("set_session_title_source", "derived"), ("set_auto_title", "新标题", "llm")]
+    assert (db.title, db.source) == ("新标题", "llm")
 
 
-def test_llm_restore_skipped_when_user_title_lands_during_two_step():
-    # 竞态：插件 set_session_title 之后、恢复 llm 来源之前用户 /title 抢先
+def test_user_title_landing_between_downgrade_and_write_is_kept():
+    # 竞态：插件降为 derived 之后、set_auto_title 之前用户 /title 抢先：宿主 CAS 拒绝写入，也不把用户标题改成 llm 来源
     db = FakeDB(messages=MSGS, title="旧标题", source="llm")
-    db.override_after_set_session_title = ("用户抢先的新标题", "user")
+    db.override_after_downgrade = ("用户抢先的新标题", "user")
     t, ctx = make_titler(db, text=_dec("rename", "新标题"))
     r = t.evaluate("s1", force=True)
     assert ("set_session_title_source", "llm") not in db.calls  # 不恢复来源
     assert db.title == "用户抢先的新标题"
     assert db.source == "user"
     assert r["action"] == "skipped"  # 权威方胜出，不算 failed
+
+
+def test_refused_llm_replacement_gives_llm_provenance_back():
+    # 宿主拒绝写入（例如同一时刻另一个自动写入）且标题仍是被降级的那个：恢复 llm 来源，不留下 derived 标题
+    db = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    db.set_auto_title = lambda sid, title, *, source: db.calls.append(("set_auto_title", title, source)) or False
+    t, _ = make_titler(db, text=_dec("rename", "新标题"))
+    assert t._write(db, "s1", "新标题", expected_title="旧标题") is None
+    assert (db.title, db.source) == ("旧标题", "llm")
+
+
+def test_write_uses_the_host_sanitized_title():
+    # 宿主写入前会清洗标题（去不可见字符）；插件按清洗后的形式写入、比较并返回，清洗后为空则不写
+    db = FakeDB(messages=MSGS)
+    db.sanitize_title = lambda title: title.replace("\u200b", "").strip() or None
+    t, _ = make_titler(db)
+    assert t._write(db, "s1", "Ship\u200b plan") == "Ship plan"
+    assert (db.title, db.source) == ("Ship plan", "llm")
+    db2 = FakeDB(messages=MSGS, title="旧标题", source="llm")
+    db2.sanitize_title = db.sanitize_title
+    assert t._write(db2, "s1", "\u200b\u200b") is None
+    assert (db2.title, db2.source) == ("旧标题", "llm")
+    assert not [c for c in db2.calls if c[0] in ("set_session_title_source", "set_auto_title")]
 
 
 def test_write_time_user_title_race_protected():
@@ -1045,15 +1067,17 @@ class SessionStateDB(FakeDB):
         self.state[sid] = (title, source)
         return True
 
-    def set_session_title(self, sid, title):
-        self.calls.append(("set_session_title", sid, title))
-        self.state[sid] = (title, "user")
-        return True
-
     def set_session_title_source(self, sid, source):
         self.calls.append(("set_session_title_source", sid, source))
         t, _ = self.state[sid]
         self.state[sid] = (t, source)
+        return t is not None
+
+    def sanitize_title(self, title):
+        return " ".join(title.split()) or None
+
+    def title_holder(self, title, *, excluding):
+        return None
 
 
 def test_retitle_all_skips_user_and_uses_blind():
@@ -1514,7 +1538,7 @@ def test_get_db_singleton_under_concurrent_first_access(monkeypatch):
     class FakeSessionDB:
         instances = 0
 
-        def __init__(self):
+        def __init__(self, home):
             # 主动释放 GIL，确保没有 _db_lock 时多个首次访问会重叠构造；
             # 避免测试仅因构造太快被线程调度偶然串行而假通过。
             time.sleep(0.02)
@@ -1542,12 +1566,8 @@ def test_get_db_isolates_profiles_by_hermes_home(monkeypatch, tmp_path):
     import hermes_auto_titler.titler as titler_mod
 
     class FakeSessionDB:
-        homes = []
-
-        def __init__(self):
-            import os
-            self.home = os.environ.get("HERMES_HOME", "default")
-            FakeSessionDB.homes.append(self.home)
+        def __init__(self, home):
+            self.home = home
 
     monkeypatch.setattr(titler_mod, "open_session_store", FakeSessionDB)
     monkeypatch.setattr(titler_mod, "_dbs", {})
@@ -1560,7 +1580,7 @@ def test_get_db_isolates_profiles_by_hermes_home(monkeypatch, tmp_path):
     db_b = titler_mod.get_db()
     assert db_a1 is db_a2  # 同 profile 复用
     assert db_a1 is not db_b  # 跨 profile 新建
-    assert db_b.home == profile_b  # B 用的是 B 的路径，不是 A 的
+    assert db_b.home == Path(profile_b).resolve()  # 打开的是 B 的路径，不是 A 的
 
 
 # -- 写回竞态：每次 apply 前刷新来源 ------------------------------------------
@@ -1569,15 +1589,17 @@ def test_user_title_lands_between_write_attempts_not_overwritten():
     # 竞态：用户 /title 在第一次写尝试（唯一性冲突 ValueError）之后、
     # 重试写之前落地。apply 每次尝试都刷新来源与保护，user 权威胜出。
     db = FakeDB(messages=MSGS, title="旧标题", source="llm", conflict_titles={"新标题"})
+    real_holder = db.title_holder
 
-    def flaky_source(sid):
-        # 首次写尝试失败（calls 里已有 set_session_title）后，来源翻转为 user
-        if any(c[0] == "set_session_title" for c in db.calls):
+    def holder_then_user_rename(title, *, excluding):
+        # 首次写尝试发现标题被占用后，用户 /title 落地
+        holder = real_holder(title, excluding=excluding)
+        if holder:
             db.title = "用户手改"
             db.source = "user"
-        return db.source
+        return holder
 
-    db.get_session_title_source = flaky_source
+    db.title_holder = holder_then_user_rename
 
     t, _ = make_titler(db, text=_dec("rename", "新标题"))
     r = t.evaluate("s1", force=True)
@@ -1585,7 +1607,7 @@ def test_user_title_lands_between_write_attempts_not_overwritten():
     assert r["reason"] == "user title is authoritative (set during evaluation)"
     assert db.title == "用户手改"  # 重试没有覆盖用户标题
     assert db.source == "user"
-    assert not any(c[0] == "set_session_title" and c[1] == "新标题 (2)" for c in db.calls)
+    assert not any(c[0] == "set_auto_title" and c[1] == "新标题 (2)" for c in db.calls)
 
 
 # -- 标题规范化与截断边界 ------------------------------------------------------

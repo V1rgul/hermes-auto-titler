@@ -3,7 +3,9 @@
 ``_write`` has two paths:
 
 * untitled / derived → ``set_auto_title``, one host transaction that writes title and llm provenance together and refuses a higher provenance;
-* llm → llm → the storage interface has no compare-and-set for an equal provenance, so the plugin checks the title it read before the model call, then writes strictly in two steps (``set_session_title`` → readback → ``set_session_title_source``) and fails closed.
+* llm → llm → ``set_auto_title`` refuses an equal provenance, so the plugin checks the title it read before the model call, downgrades it to derived with ``set_session_title_source`` and then writes through the same ``set_auto_title``; a refused write gives llm provenance back only while the downgraded title is still there.
+
+Both paths first sanitize the candidate as the host stores it and look up ``title_holder``: an automatic title never takes a name from another session.
 
 ``RealSqliteHost`` backs those calls with a real ``sqlite3`` database with the host's ``sessions`` columns, not a mock.
 
@@ -82,13 +84,14 @@ class RealSqliteHost:
         )
         return cur.rowcount > 0
 
-    def set_session_title(self, sid, title):
-        self.writes += 1
-        cur = self.conn.execute(
-            "UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?",
-            (title, sid),
-        )
-        return cur.rowcount > 0
+    def sanitize_title(self, title):
+        return " ".join(title.split()) or None
+
+    def title_holder(self, title, *, excluding):
+        row = self.conn.execute(
+            "SELECT id FROM sessions WHERE title = ? AND id != ?", (title, excluding)
+        ).fetchone()
+        return row["id"] if row else None
 
     def set_session_title_source(self, sid, source):
         self.writes += 1
@@ -138,8 +141,8 @@ def _titler(db, text, cfg=None):
     )
 
 
-def test_llm_rename_lands_through_two_step_fail_closed_write():
-    # llm → llm: set_auto_title would refuse an equal provenance, so the plugin writes the title (user provenance) and then restores llm provenance.
+def test_llm_rename_lands_through_downgrade_then_set_auto_title():
+    # llm → llm: set_auto_title refuses an equal provenance, so the plugin downgrades to derived and then writes through set_auto_title.
     host = RealSqliteHost()
     host.add_session("s1", "旧标题", "llm")
     t = _titler(host, _dec("rename", "新标题"))
@@ -149,7 +152,7 @@ def test_llm_rename_lands_through_two_step_fail_closed_write():
     assert r["action"] == "renamed"
     assert host.get_session_title("s1") == "新标题"
     assert host.get_session_title_source("s1") == "llm"
-    # write (set_session_title) + source recovery; readback is a plain read
+    # downgrade + set_auto_title; no provenance write follows a successful replacement
     assert host.writes == 2
 
 
@@ -189,26 +192,52 @@ def test_user_title_set_before_write_is_not_overwritten():
     assert host.writes == 0
 
 
-def test_two_step_write_aborts_when_readback_disagrees():
+def test_user_title_landing_after_downgrade_is_neither_overwritten_nor_relabelled():
     host = RealSqliteHost()
     host.add_session("s1", "旧标题", "llm")
     t = _titler(host, _dec("rename", "新标题"))
 
-    # Another writer lands between set_session_title and the readback.
-    real_set = host.set_session_title
+    # A user rename lands between the downgrade and set_auto_title.
+    real_source = host.set_session_title_source
 
-    def racing_set(sid, title):
-        ok = real_set(sid, title)
-        host.conn.execute(
-            "UPDATE sessions SET title = '外部写入' WHERE id = ?", (sid,)
-        )
+    def racing_source(sid, source):
+        ok = real_source(sid, source)
+        if source == "derived":
+            host.conn.execute(
+                "UPDATE sessions SET title = '用户手改', title_source = 'user' WHERE id = ?", (sid,)
+            )
         return ok
 
-    host.set_session_title = racing_set
-    r = t._write(host, "s1", "新标题")
+    host.set_session_title_source = racing_source
+    r = t._write(host, "s1", "新标题", expected_title="旧标题")
 
     assert r is None
-    assert host.get_session_title("s1") == "外部写入"
+    assert host.get_session_title("s1") == "用户手改"
+    assert host.get_session_title_source("s1") == "user"
+
+
+def test_refused_replacement_gives_llm_provenance_back():
+    # set_auto_title refuses (the row changed under it); the downgraded title is still there, so it gets llm provenance back instead of staying derived.
+    host = RealSqliteHost()
+    host.add_session("s1", "旧标题", "llm")
+    t = _titler(host, _dec("rename", "新标题"))
+    host.set_auto_title = lambda sid, title, *, source: False
+
+    assert t._write(host, "s1", "新标题", expected_title="旧标题") is None
+    assert host.get_session_title("s1") == "旧标题"
+    assert host.get_session_title_source("s1") == "llm"
+
+
+def test_title_held_by_another_session_is_not_taken():
+    # The host would free a title held by an empty ended session for any writer; an automatic title takes the next suffix instead.
+    host = RealSqliteHost()
+    host.add_session("ghost", "新标题", "user")
+    host.add_session("s1", None, None)
+    t = _titler(host, _dec("rename", "新标题"))
+
+    assert t._write(host, "s1", "新标题") == "新标题 (2)"
+    assert host.get_session_title("ghost") == "新标题"
+    assert host.get_session_title_source("ghost") == "user"
 
 
 def test_untitled_session_uses_set_auto_title_only():
@@ -232,8 +261,9 @@ def test_host_stub_covers_every_host_api_the_plugin_calls():
         "get_messages_as_conversation",
         "get_session_title",
         "get_session_title_source",
+        "sanitize_title",
+        "title_holder",
         "set_auto_title",
-        "set_session_title",
         "set_session_title_source",
         "list_sessions_rich",
         "record_auxiliary_usage",
@@ -243,7 +273,7 @@ def test_host_stub_covers_every_host_api_the_plugin_calls():
     host.add_session("s1", "旧标题", "llm")
     rec = RecordingHost(host)
     t = _titler(rec, _dec("rename", "新标题"))
-    t.evaluate("s1", force=True)          # llm → llm rename (two-step path)
+    t.evaluate("s1", force=True)          # llm → llm rename (downgrade path)
     t._write(rec, "s1", "另一个标题")
     t.retitle_all(dry_run=True)            # list_sessions_rich path
     # None/derived source → set_auto_title path

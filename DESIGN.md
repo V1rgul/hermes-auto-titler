@@ -227,10 +227,12 @@ derived < llm < user
 - 唯一性冲突时添加递增后缀，并继续满足字符与显示宽度上限；
 - 成功自动写入后保持 `source=llm`，让以后用户手改仍拥有更高优先级。
 
-写回经由 Hermes 0.23.3 的存储接口（`hermes_auto_titler/host_store.py` 的 `SessionStore`），按当前来源分两条路径：
+写回经由 Hermes 0.23.3 的存储接口（`hermes_auto_titler/host_store.py` 的 `SessionStore`），标题只通过宿主 `set_auto_title` 写入：它在单个宿主事务内同时写入标题与 `source=llm`，并拒绝覆盖同级或更高来源。
 
-- **无标题 / derived**：宿主 `set_auto_title` 在单个宿主事务内同时写入标题与 `source=llm`，并拒绝覆盖更高来源。
-- **llm → llm**：存储接口没有同级来源的 compare-and-set（`set_auto_title` 只覆盖更低来源），因此先核对模型调用前读到的标题，再严格两步 fail-closed（`set_session_title` → 回读校验 → 恢复 `source=llm`）。两步之间该行短暂标为 `user`；用户恰好在最后一次核对与写入之间改名时，其标题会被覆盖。
+- 候选先按宿主存储的形式清洗（`sanitize_title`：去不可见与控制字符、折叠空白），写入、比较与返回都使用清洗后的标题；清洗后为空则不写。
+- 写入前用 `title_holder` 查询占用者：宿主会为任何写入者让出已结束空会话、压缩祖先或已退役 Bot Chat 持有的标题，自动标题从不拿走其他会话的名字，被占用时改用递增后缀。
+- **无标题 / derived**：直接 `set_auto_title`。
+- **llm → llm**：`set_auto_title` 拒绝同级来源，因此先核对模型调用前读到的标题，再用 `set_session_title_source` 降为 `derived`，然后由同一个 `set_auto_title` 写入。降级之后落地的用户标题会被这次 CAS 拒绝，且保持 `user` 来源；写入被拒时，只有被降级的标题仍在原处才恢复 `llm` 来源。剩余窗口是「最后一次核对」与「降级」之间：此时落地的用户标题会被降级并覆盖。
 
 两条路径由真实 `sqlite3` 连接与宿主一致的 `sessions` 表驱动（见 `tests/test_host_write_contract.py`），插件调用的每个存储方法都必须存在于 `SessionStore`，否则该测试转红；`scripts/integration_check.py` 在临时 HERMES_HOME 中对运行中的宿主验证同一组方法。
 
@@ -304,18 +306,18 @@ python3 scripts/check_catalog_sync.py --json     # 机器可读
 本地 Hermes 环境建议在 0.2 发布前重新跑：
 
 ```bash
-# 临时 SessionDB 的来源/冲突集成验证
-<your-hermes-checkout>/venv/bin/python scripts/integration_check.py
+# 临时会话存储的来源/冲突集成验证
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/integration_check.py
 
 # 真实历史会话 dry-run；使用生产配置预算
-<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
-<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
 
 # 指定安全会话的真实模型、写回与 usage 验证
-<your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 
 # 批量范围预览，不调用模型、不写标题
-<your-hermes-checkout>/venv/bin/python scripts/retitle_all.py --dry-run
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/retitle_all.py --dry-run
 ```
 
 `review_sample.py` 在 0.2 中改为复用当前插件配置的 opening/recent/trajectory/summary 预算，并支持临时 strategy override，因此更接近真实运行输入。
@@ -351,7 +353,7 @@ The default comparison is the current prompt. Select extra variants explicitly; 
 
 1. **`first_title_mode` 的宿主副作用不可逆管理**：插件能关闭内建标题器，但不知道它原本是谁关的，也不会自动恢复。更好的长期设计是保存所有权/原值，或让宿主提供临时抑制接口。
 2. **status 不解析宿主实际路由**：默认 auxiliary 模式下只能看到 `(host default)`。
-3. **llm→llm 没有宿主级 CAS**：两步写入留有极小竞态窗口（见上文写回路径），只能等待 Hermes 提供同级来源的 compare-and-set 写入 API。
+3. **llm→llm 没有宿主级同级 CAS**：降级写入在「最后一次核对」与「降级」之间留有极小竞态窗口（见上文写回路径），只能等待 Hermes 提供同级来源的 compare-and-set 写入 API。
 4. **调度状态跨重启恢复与门禁对齐**：`state.json` 原子持久化 typed `retry` / `finalize` / `pending_review` / `counter`。`_pending`、`_failed_sessions` 与 `_rename_counts` 均可安全重建；未背书候选绝不偷跑写库，普通 `counter` 与 `pending` 记录绝不误转重试。
 5. **高 N 会带来明显更新延迟**：确认按后续评估次数计算，而评估本身还受 `every_n_turns` / `min_interval_minutes` 约束，因此不建议无理由把 `rename_confirmations` 调得很大。
 6. **改名上限持久化保护**：`max_renames_per_session` 默认关闭。设为 N 后按会话持久化累计改名次数，重启后继续生效，有效控制标题抖动与预算。

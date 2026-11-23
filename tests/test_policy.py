@@ -45,6 +45,13 @@ class FakeDB:
     def set_session_title_source(self, sid, source):
         self.source = source
         self.calls.append(("set_session_title_source", source))
+        return self.title is not None
+
+    def sanitize_title(self, title):
+        return " ".join(title.split()) or None
+
+    def title_holder(self, title, *, excluding):
+        return None
 
 
 class FakeLlm:

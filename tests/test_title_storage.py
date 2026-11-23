@@ -23,7 +23,7 @@ TITLES = [CHINESE_TITLE, IDENTIFIER_TITLE]
 class TransactionalSandbox(SandboxSqliteSessionDB):
     """Real isolated SQLite modelling the Hermes 0.23.3 store's title writes.
 
-    Each write is one host transaction: ``set_auto_title`` writes over an untitled or derived row only, ``set_session_title`` writes a user title and ``set_session_title_source`` rewrites the provenance. The plugin cannot reach the transaction itself, so replacing an llm title takes two of them.
+    Each write is one host transaction: ``set_auto_title`` writes over an untitled or derived row only and ``set_session_title_source`` rewrites the provenance. The plugin cannot reach the transaction itself, so replacing an llm title takes two of them (downgrade to derived, then ``set_auto_title``).
     """
 
     def __init__(self, db_path):
@@ -58,14 +58,6 @@ class TransactionalSandbox(SandboxSqliteSessionDB):
                 "WHERE id = ? AND (title IS NULL OR title = '' "
                 "OR title_source = 'derived')",
                 (title, source, session_id),
-            ).rowcount > 0
-        )
-
-    def set_session_title(self, session_id, title):
-        return self._transaction(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?",
-                (title, session_id),
             ).rowcount > 0
         )
 
@@ -123,8 +115,15 @@ def sandbox(tmp_path):
 
 
 def committed(source):
-    """The transactions of one successful write: llm → llm takes the user-title write plus the provenance rewrite."""
+    """The transactions of one successful write: llm → llm takes the downgrade to derived plus ``set_auto_title``."""
     return ["BEGIN", "COMMIT"] * (2 if source == "llm" else 1)
+
+
+def refused(source):
+    """The transactions of a write the host rejects: llm → llm downgrades, fails, then gives llm provenance back."""
+    if source == "llm":
+        return ["BEGIN", "COMMIT", "BEGIN", "ROLLBACK", "BEGIN", "COMMIT"]
+    return ["BEGIN", "ROLLBACK"]
 
 
 def make_titler(db, *, title=CHINESE_TITLE, action="rename", **cfg):
@@ -236,7 +235,7 @@ def test_manual_title_set_during_model_call_is_not_overwritten(sandbox):
     assert sandbox.write_attempts == 0
 
 
-# Only set_auto_title rejects a user title that lands between the plugin's last check and its write. An llm → llm replacement has no compare-and-set on the Hermes 0.23.3 storage interface, so that race is not covered there.
+# A user title landing just before the first write is refused by set_auto_title itself. For an llm → llm replacement the first write is the downgrade to derived, which the host applies to any titled row, so that window stays open there; a user title landing after the downgrade is covered by the next test.
 @pytest.mark.parametrize("source", [None, "derived"])
 def test_manual_takeover_at_transaction_boundary_fails_without_suffix(sandbox, source):
     old = "Old title" if source is not None else None
@@ -251,6 +250,26 @@ def test_manual_takeover_at_transaction_boundary_fails_without_suffix(sandbox, s
     assert sandbox.get_session_title_source("target") == "user"
     assert sandbox.write_attempts == 1
     assert sandbox.transaction_log == ["BEGIN", "COMMIT"]
+
+
+def test_manual_takeover_after_llm_downgrade_keeps_user_title(sandbox):
+    sandbox.add("target", "Old title", "llm")
+    titler, _ = make_titler(sandbox)
+    transaction = sandbox._transaction
+
+    def takeover_before_second_write(fn):
+        if sandbox.write_attempts == 1:
+            sandbox.conn.execute(
+                "UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?",
+                ("Manual replacement", "target"),
+            )
+        return transaction(fn)
+
+    sandbox._transaction = takeover_before_second_write
+    assert titler._write(sandbox, "target", CHINESE_TITLE, expected_title="Old title") is None
+    assert sandbox.get_session_title("target") == "Manual replacement"
+    assert sandbox.get_session_title_source("target") == "user"
+    assert sandbox.transaction_log == ["BEGIN", "COMMIT", "BEGIN", "COMMIT"]
 
 
 def test_external_llm_rename_during_model_call_is_not_overwritten(sandbox):
@@ -332,7 +351,8 @@ def test_duplicate_suffix_keeps_the_entire_base(sandbox, source, title):
     assert sandbox.get_session_title("target") == expected
     assert sandbox.get_session_title_source("target") == "llm"
     assert sandbox.get_session_title("occupied") == title
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] + committed(source)
+    # The held name is found before any write, so no transaction rolls back.
+    assert sandbox.transaction_log == committed(source)
 
 
 @pytest.mark.parametrize("source", [None, "llm"])
@@ -350,8 +370,7 @@ def test_duplicate_that_cannot_fit_suffix_is_rejected_without_base_crop(
     assert sandbox.get_session_title("target") == old
     assert sandbox.get_session_title_source("target") == source
     assert sandbox.get_session_title("occupied") == title
-    assert sandbox.write_attempts == 1
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"]
+    assert sandbox.write_attempts == 0
 
 
 @pytest.mark.parametrize("source", [None, "llm"])
@@ -364,7 +383,7 @@ def test_multiple_duplicate_suffixes_are_tried_in_order(sandbox, source):
     titler, _ = make_titler(sandbox)
     assert titler._write(sandbox, "target", title, expected_title=old) == title + " (4)"
     assert sandbox.get_session_title("target") == title + " (4)"
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] * 3 + committed(source)
+    assert sandbox.transaction_log == committed(source)
 
 
 @pytest.mark.parametrize("source", [None, "llm"])
@@ -383,9 +402,7 @@ def test_two_digit_suffix_obeys_storage_limit_without_shortening(sandbox, source
     assert titler._write(sandbox, "target", title, expected_title=old) == expected
     assert sandbox.get_session_title("target") == (expected if expected else old)
     assert sandbox.get_session_title_source("target") == ("llm" if expected else source)
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"] * 9 + (
-        committed(source) if expected else []
-    )
+    assert sandbox.transaction_log == (committed(source) if expected else [])
 
 
 @pytest.mark.parametrize("final_available", [True, False])
@@ -399,7 +416,7 @@ def test_all_suffixes_through_19_are_attempted_without_cropping(sandbox, final_a
     expected = f"{title} (19)" if final_available else None
     assert titler._write(sandbox, "target", title) == expected
     assert sandbox.get_session_title("target") == expected
-    assert sandbox.write_attempts == 19
+    assert sandbox.write_attempts == (1 if final_available else 0)
     assert not sandbox.conn.in_transaction
 
 
@@ -430,8 +447,7 @@ def test_non_unique_integrity_constraint_does_not_trigger_suffixes(sandbox, sour
     assert titler._write(sandbox, "target", CHINESE_TITLE, expected_title=old) is None
     assert sandbox.get_session_title("target") == old
     assert sandbox.get_session_title_source("target") == source
-    assert sandbox.write_attempts == 1
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"]
+    assert sandbox.transaction_log == refused(source)
 
 
 @pytest.mark.parametrize("source", [None, "llm"])
@@ -468,8 +484,7 @@ def test_audit_table_unique_failure_is_not_a_title_collision(sandbox, source):
     assert titler._write(sandbox, "target", CHINESE_TITLE, expected_title=old) is None
     assert sandbox.get_session_title("target") == old
     assert sandbox.get_session_title_source("target") == source
-    assert sandbox.write_attempts == 1
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"]
+    assert sandbox.transaction_log == refused(source)
     assert [tuple(row) for row in sandbox.conn.execute("SELECT value FROM audit")] == [
         ("occupied",)
     ]
@@ -492,8 +507,7 @@ def test_session_id_unique_failure_is_not_a_title_collision(sandbox, source):
     assert sandbox.get_session_title("target") == old
     assert sandbox.get_session_title_source("target") == source
     assert sandbox.get_session_title("occupied-id") == "Another session"
-    assert sandbox.write_attempts == 1
-    assert sandbox.transaction_log == ["BEGIN", "ROLLBACK"]
+    assert sandbox.transaction_log == refused(source)
 
 
 def test_title_source_unique_failure_is_not_a_title_collision(sandbox):

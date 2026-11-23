@@ -4,9 +4,9 @@
 测试脚本与真实运行使用不同的 preview / trajectory / summary 预算。
 
 用法:
-  <your-hermes-venv>/bin/python scripts/review_sample.py --n 20
-  <your-hermes-venv>/bin/python scripts/review_sample.py --n 20 --strategy aggressive
-  <your-hermes-venv>/bin/python scripts/review_sample.py --n 20 --blind
+  PYTHONPATH=<your-hermes-checkout> <your-hermes-venv>/bin/python scripts/review_sample.py --n 20
+  PYTHONPATH=<your-hermes-checkout> <your-hermes-venv>/bin/python scripts/review_sample.py --n 20 --strategy aggressive
+  PYTHONPATH=<your-hermes-checkout> <your-hermes-venv>/bin/python scripts/review_sample.py --n 20 --blind
 """
 
 import argparse

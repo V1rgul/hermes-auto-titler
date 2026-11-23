@@ -197,14 +197,16 @@ def migrate_legacy_state() -> None:
 
 
 def get_db() -> SessionStore:
-    key = str(get_hermes_home())
+    # Key by the resolved home and open that same home: a relative HERMES_HOME resolved against a changed working directory is another profile.
+    home = Path(get_hermes_home()).expanduser().resolve()
+    key = str(home)
     db = _dbs.get(key)
     if db is not None:
         return db
     with _db_lock:
         db = _dbs.get(key)
         if db is None:
-            db = open_session_store()
+            db = open_session_store(home)
             _dbs[key] = db
     return db
 
@@ -1802,10 +1804,26 @@ class AutoTitler:
                 return "legacy title (NULL provenance) is protected"
         return None
 
+    def _restore_llm_source(self, db: SessionStore, session_id: str, downgraded_title: Optional[str]) -> None:
+        """Give llm provenance back after a refused replacement, only while the row still holds the derived title this write downgraded; any newer title keeps its own provenance."""
+        try:
+            if db.get_session_title(session_id) == downgraded_title and db.get_session_title_source(session_id) == TITLE_SOURCE_DERIVED:
+                db.set_session_title_source(session_id, TITLE_SOURCE_LLM)
+        except Exception as e:
+            log.warning("auto-titler %s: failed to restore llm provenance after a refused write: %s", session_id[:12], e)
+
     def _write(self, db: SessionStore, session_id: str, title: str, expected_title: Optional[str] = None) -> Optional[str]:
         title = self._prepare_candidate(title)
         if not title:
             return None
+        # The host stores the sanitized form (invisible and control characters removed, whitespace collapsed); write and compare that form so a stored title matches the candidate.
+        try:
+            stored_form = db.sanitize_title(title)
+        except ValueError:
+            return None
+        if not stored_form:
+            return None
+        title = stored_form
 
         # 快速失败：写回前先核对一次权威性（LLM 调用期间用户可能 /title）。
         # apply() 内每次实际写尝试还会再刷新一次来源与保护，覆盖冲突重试
@@ -1821,45 +1839,36 @@ class AutoTitler:
                 src = db.get_session_title_source(session_id)
             except Exception:
                 src = None
-
-            # 无标题 / derived → llm：set_auto_title 是单事务 CAS（title +
-            # source 一起写），原子，无 crash window；legacy NULL 由上游按
-            # user 权威拒绝。
-            if src is None or src == TITLE_SOURCE_DERIVED:
-                return bool(
-                    db.set_auto_title(session_id, t, source=TITLE_SOURCE_LLM)
-                )
             # 来源在我们检查后变成了 user：永不覆盖用户标题
             if src == TITLE_SOURCE_USER:
                 return False
 
-            # llm → llm：存储接口没有比较并写入的原子操作（set_auto_title 只覆盖更低来源），因此先核对进入 _write 前读到的标题快照，LLM 推理期间被外部改名则放弃，再严格两步 fail-closed 写入（用户标题 → 回读 → 恢复 llm 来源）。
-            if expected_title is not None:
-                try:
-                    if db.get_session_title(session_id) != expected_title:
-                        return False
-                except Exception as e:
-                    log.warning("auto-titler %s: failed to read title before write, failing closed: %s", session_id[:12], e)
-                    return False
-            if db.set_session_title(session_id, t):
-                try:
-                    stored = db.get_session_title(session_id)
-                except Exception as e:
-                    log.warning("auto-titler %s: failed to readback title after write, failing closed: %s", session_id[:12], e)
-                    return False
-                if stored != t:
-                    log.warning("auto-titler %s: stored title %r != expected %r, aborting source recovery", session_id[:12], stored, t)
-                    return False
-                try:
-                    res_src = db.set_session_title_source(session_id, TITLE_SOURCE_LLM)
-                    if res_src is False:
-                        log.warning("auto-titler %s: set_session_title_source returned False, failing closed", session_id[:12])
-                        return False
-                except Exception as e:
-                    log.warning("auto-titler %s: exception during source recovery, failing closed: %s", session_id[:12], e)
-                    return False
-                return True
-            return False
+            # The host frees a title held by an empty ended session, a compression ancestor or a retired Bot Chat for any writer; an automatic title never takes a name from another session, so a held name tries the next suffix instead.
+            holder = db.title_holder(t, excluding=session_id)
+            if holder:
+                raise ValueError(f"Title '{t}' is already in use by session {holder}")
+
+            # 无标题 / derived → llm：set_auto_title 是宿主单事务 CAS（标题与来源一起写，只覆盖更低来源）。
+            if src is None or src == TITLE_SOURCE_DERIVED:
+                return bool(db.set_auto_title(session_id, t, source=TITLE_SOURCE_LLM))
+
+            # llm → llm: set_auto_title refuses an equal provenance, so the title is first downgraded to derived and then replaced by that same atomic write, which refuses if a user title lands in between. An external rename during the model call is caught by the snapshot check; one landing between that check and the downgrade is the remaining window.
+            try:
+                current = db.get_session_title(session_id)
+            except Exception as e:
+                log.warning("auto-titler %s: failed to read title before write, failing closed: %s", session_id[:12], e)
+                return False
+            if expected_title is not None and current != expected_title:
+                return False
+            if not db.set_session_title_source(session_id, TITLE_SOURCE_DERIVED):
+                return False
+            written = False
+            try:
+                written = bool(db.set_auto_title(session_id, t, source=TITLE_SOURCE_LLM))
+                return written
+            finally:
+                if not written:
+                    self._restore_llm_source(db, session_id, current)
 
         for i in range(1, 20):
             cand = title if i == 1 else f"{title} ({i})"

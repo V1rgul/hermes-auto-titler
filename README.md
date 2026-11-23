@@ -204,11 +204,11 @@ A lightweight auxiliary model fits the intended cost profile, but verify against
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 .venv/bin/python -m pytest tests/ -v
-<your-hermes-checkout>/venv/bin/python scripts/integration_check.py
-<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
-<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
-<your-hermes-checkout>/venv/bin/python scripts/prompt_acceptance.py --n 8 --seed 17 --output /tmp/title-experiment.jsonl
-<your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/integration_check.py
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/prompt_acceptance.py --n 8 --seed 17 --output /tmp/title-experiment.jsonl
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 ```
 
 `review_sample.py` runs in dry-run mode, mirroring the production context config (preview lengths, trajectory limits, summary budgets).

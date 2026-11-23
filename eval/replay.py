@@ -127,19 +127,29 @@ class SandboxSqliteSessionDB:
         return session_id
 
     def set_session_title(self, session_id: str, title: str) -> bool:
-        cur = self.conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
+        """A user title, as the host writes it; seeding another provenance takes ``set_session_title_source`` afterwards."""
+        cur = self.conn.execute("UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?", (title, session_id))
         return cur.rowcount > 0
 
     def set_session_title_source(self, session_id: str, source: str) -> bool:
-        cur = self.conn.execute("UPDATE sessions SET title_source = ? WHERE id = ?", (source, session_id))
+        cur = self.conn.execute("UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL", (source, session_id))
         return cur.rowcount > 0
 
     def set_auto_title(self, session_id: str, title: str, source: str = "llm") -> bool:
+        """The host's precedence: an automatic title lands only over an untitled row or a strictly lower provenance (derived below llm)."""
         cur = self.conn.execute(
-            "UPDATE sessions SET title = ?, title_source = ? WHERE id = ?",
-            (title, source, session_id),
+            "UPDATE sessions SET title = ?, title_source = ? "
+            "WHERE id = ? AND (title IS NULL OR (title_source = 'derived' AND ? = 'llm'))",
+            (title, source, session_id, source),
         )
         return cur.rowcount > 0
+
+    def sanitize_title(self, title: str) -> Optional[str]:
+        return " ".join(title.split()) or None
+
+    def title_holder(self, title: str, *, excluding: str) -> Optional[str]:
+        row = self.conn.execute("SELECT id FROM sessions WHERE title = ? AND id != ?", (title, excluding)).fetchone()
+        return row["id"] if row else None
 
     def record_auxiliary_usage(self, session_id: str, task: str, **kwargs: Any) -> None:
         pass

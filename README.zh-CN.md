@@ -206,10 +206,10 @@ model: "你的模型名"         # Hermes 能访问到的任意模型
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python pytest PyYAML
 .venv/bin/python -m pytest tests/ -v
-<your-hermes-checkout>/venv/bin/python scripts/integration_check.py
-<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
-<your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
-<your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/integration_check.py
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/review_sample.py --n 20 --strategy aggressive
+PYTHONPATH=<your-hermes-checkout> <your-hermes-checkout>/venv/bin/python scripts/e2e_check.py <session_id>
 ```
 
 `review_sample.py` 以 dry-run 模式运行，完整复用生产配置（preview 长度、轨迹限制、摘要预算）。
